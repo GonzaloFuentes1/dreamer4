@@ -1,0 +1,36 @@
+# configs/train_dynamics.yaml
+# Top-level config for dynamics (world model) training.
+# Composes dynamics/base and data/local by default.
+# Override via CLI: python train_dynamics.py dynamics=small data=cluster
+
+defaults:
+  - dynamics: base
+  - data: local
+  - _self_
+
+seed: 0
+compile: false
+
+trainer:
+  max_steps: 10_000_000
+  precision: "16-mixed"
+  accumulate_grad_batches: 1
+  log_every_n_steps: 200
+  num_nodes: 1
+  devices: 8
+  strategy: ddp
+  enable_progress_bar: true
+
+checkpoint:
+  dirpath: ./logs/dynamics_ckpts
+  every_n_train_steps: 10000
+  save_top_k: -1
+  filename: "step_{step:07d}"
+
+wandb:
+  project: dreamer4-dynamics
+  name: default
+  entity: null
+
+# Optional: path to resume from (Lightning .ckpt format)
+resume: null

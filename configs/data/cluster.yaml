@@ -1,0 +1,22 @@
+# configs/data/cluster.yaml
+# Data paths for cluster / multi-node runs. Override with your actual paths.
+
+frame_dirs:
+  - /mnt/nfs/expert-shards
+  - /mnt/nfs/mixed-small-shards
+  - /mnt/nfs/mixed-large-shards
+
+data_dirs:
+  - /mnt/nfs/expert
+  - /mnt/nfs/mixed-small
+  - /mnt/nfs/mixed-large
+
+tasks_json: ${hydra:runtime.cwd}/../tasks.json
+
+seq_len_tokenizer: 8
+batch_size_tokenizer: 8
+
+seq_len_dynamics: 32
+batch_size_dynamics: 24
+
+num_workers: 16

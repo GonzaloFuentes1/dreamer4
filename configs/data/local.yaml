@@ -1,0 +1,28 @@
+# configs/data/local.yaml
+# Data paths for local development. Override with your actual paths.
+
+# Frame shards (preprocessed by preprocess_dataset.py) — used by tokenizer training
+frame_dirs:
+  - /data/expert-shards
+  - /data/mixed-small-shards
+  - /data/mixed-large-shards
+
+# Raw demo data (actions + rewards) — used by dynamics training
+data_dirs:
+  - /data/expert
+  - /data/mixed-small
+  - /data/mixed-large
+
+# Task metadata JSON
+tasks_json: ${hydra:runtime.cwd}/../tasks.json
+
+# Tokenizer training
+seq_len_tokenizer: 8
+batch_size_tokenizer: 8
+
+# Dynamics training
+seq_len_dynamics: 32
+batch_size_dynamics: 24
+
+# Shared
+num_workers: 8

@@ -1,0 +1,39 @@
+# configs/dynamics/base.yaml
+# Full-scale dynamics (world model) architecture hyperparameters.
+
+# Frozen tokenizer checkpoint (required — set via CLI or data config)
+tokenizer_ckpt: ???
+
+# Packing: pack n_latents into n_latents/packing_factor spatial tokens
+packing_factor: 2
+
+# Architecture
+d_model_dyn: 512
+dyn_depth: 8
+n_heads: 4
+dropout: 0.0
+mlp_ratio: 4.0
+time_every: 1
+n_register: 4
+n_agent: 1
+space_mode: wm_agent_isolated   # choices: wm_agent_isolated, wm_agent
+k_max: 8                        # must be a power of 2
+
+# Shortcut / bootstrapping
+bootstrap_start: 5000
+self_fraction: 0.25
+use_actions: true
+
+# Optimizer
+lr: 1.0e-4
+weight_decay: 1.0e-2
+grad_clip: 1.0
+
+# Evaluation
+eval_every: 1000
+eval_batch_size: 4
+eval_max_items: 4
+eval_ctx: 8
+eval_horizon: 16
+eval_schedule: shortcut   # choices: finest, shortcut
+eval_d: 0.25

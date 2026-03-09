@@ -1,0 +1,35 @@
+# configs/tokenizer/base.yaml
+# Full-scale tokenizer architecture hyperparameters.
+
+# Image / patching
+H: 128
+W: 128
+C: 3
+patch: 4
+
+# Architecture
+d_model: 256
+n_heads: 4
+depth: 8
+n_latents: 16
+d_bottleneck: 32
+dropout: 0.05
+mlp_ratio: 4.0
+time_every: 1
+latents_only_time: true
+mae_p_min: 0.0
+mae_p_max: 0.9
+
+# Optimizer
+lr: 1.0e-4
+weight_decay: 1.0e-2
+
+# Loss
+lpips_weight: 0.2
+lpips_frac: 0.5
+lpips_net: alex   # choices: alex, vgg, squeeze
+
+# Viz (logged every viz_every steps)
+viz_every: 500
+viz_max_items: 4
+viz_max_T: 8
