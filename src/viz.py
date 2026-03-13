@@ -1,5 +1,5 @@
 # viz.py
-# Visualisation helpers extracted from train_tokenizer.py and train_dynamics.py.
+# Visualisation helpers extracted from train_phase1a_tokenizer.py and train_phase1b_dynamics.py.
 # All functions are @torch.no_grad() and log to W&B.
 
 from typing import Any, Dict, Optional

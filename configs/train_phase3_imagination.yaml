@@ -1,0 +1,36 @@
+# configs/train_agent.yaml
+# Top-level config for Phase 3 — agent training in latent space.
+# Composes agent/base and data/local by default.
+# Override via CLI: python train_agent.py agent=small data=cluster
+
+defaults:
+  - agent: base
+  - data: local
+  - _self_
+
+seed: 0
+compile: false
+
+trainer:
+  max_steps: 5_000_000
+  precision: "16-mixed"
+  accumulate_grad_batches: 1
+  log_every_n_steps: 200
+  num_nodes: 1
+  devices: 8
+  strategy: ddp_find_unused_parameters_true
+  enable_progress_bar: true
+
+checkpoint:
+  dirpath: ./logs/agent_ckpts
+  every_n_train_steps: 5000
+  save_top_k: -1
+  filename: "step_{step:07d}"
+
+wandb:
+  project: dreamer4-agent
+  name: default
+  entity: null
+
+# Optional: resume from a Lightning checkpoint
+resume: null

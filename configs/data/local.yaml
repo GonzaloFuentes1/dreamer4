@@ -14,7 +14,12 @@ data_dirs:
   - /data/mixed-large
 
 # Task metadata JSON
-tasks_json: ${hydra:runtime.cwd}/../tasks.json
+tasks_json: ${hydra:runtime.cwd}/tasks.json
+
+# Filtro de tasks (null = todos los encontrados en data_dirs)
+tasks: null
+# Si strict_tasks=true, falla si algún task del filtro no tiene datos
+strict_tasks: false
 
 # Tokenizer training
 seq_len_tokenizer: 8

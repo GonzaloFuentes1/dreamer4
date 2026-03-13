@@ -1,0 +1,47 @@
+# configs/collect/base.yaml
+# Hyperparameters for Phase 0 — episode collection from DMControl environments.
+#
+# Policy modes:
+#   policy: random     Bootstrap from scratch — random Gaussian actions.
+#   policy: agent      Use a previously trained policy (finetune.ckpt or agent.ckpt).
+#
+# Recursive cycle example:
+#   Cycle 0 → policy=random,  out_data_dir=./data/cycle0/demos, out_frames_dir=./data/cycle0/frames
+#   Cycle N → policy=agent,   agent_ckpt=./logs/agent_ckpts/last.ckpt
+#             out_data_dir=./data/cycleN/demos, out_frames_dir=./data/cycleN/frames
+#   Then in train_phase1b_dynamics.yaml, set data.data_dirs=[cycle0/demos, cycleN/demos]
+
+# ─── Environment ─────────────────────────────────────────────────────────────
+tasks: null                   # null → collect ALL tasks in TASK_SET; or list e.g. [walker-walk, cheetah-run]
+n_episodes_per_task: 50       # episodes to collect per task
+episode_len: 1000             # max steps per episode (hard cutoff)
+img_size: 128                 # frame render resolution (H=W)
+camera_id: 0                  # DMControl camera ID
+action_dim: 16                # max action dimension (shorter envs are zero-padded)
+
+# ─── Output paths ────────────────────────────────────────────────────────────
+out_data_dir: ./data/demos    # {out_data_dir}/{task}.pt  → episode/action/reward tensors
+out_frames_dir: ./data/frames # {out_frames_dir}/{task}/{task}_shard{n:04d}.pt → RGB uint8
+tasks_json: ./data/tasks.json # written once with action_dim + zero 512-d text embeddings
+shard_size: 2048              # frames per shard file  (match WMDataset default)
+overwrite: false              # if false, skip tasks whose demo .pt already exists
+
+# ─── Policy ──────────────────────────────────────────────────────────────────
+policy: random                # "random" | "agent"
+agent_ckpt: ???               # required when policy=agent (Phase 2 or Phase 3 checkpoint)
+
+# Agent policy context window (ignored for random policy)
+context_len: 16               # past frames fed to Dynamics to compute h_t
+packing_factor: 2             # must match checkpoint (sets n_spatial = n_latents // packing_factor)
+action_noise: 0.05            # std of Gaussian exploration noise added on top of agent actions
+
+# ─── Parallelism ──────────────────────────────────────────────────────────────
+num_workers: 4             # tasks collected in parallel (each spawns own MuJoCo+policy)
+
+# ─── Vectorized collection (batched GPU inference, policy=agent only) ──────────
+vectorized: false          # set true to use VectorizedAgentPolicy (Option C)
+n_envs_per_batch: 4        # number of simultaneous env slots sharing one GPU call
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+seed: 42
+verbose: true

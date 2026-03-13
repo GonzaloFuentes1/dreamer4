@@ -1,0 +1,36 @@
+# configs/download/base.yaml
+# Config for download_pretrain_data.py — downloads nicklashansen/dreamer4 from HuggingFace
+# and re-renders pixel frames by replaying stored actions in DMControl.
+#
+# Produces output in identical format to collect_phase0_data.py:
+#   {out_data_dir}/{task}.pt          → {"episode", "action", "reward"}
+#   {out_frames_dir}/{task}/{task}_shard{n:04d}.pt → {"frames": (K,3,H,W) uint8}
+#
+# Usage:
+#   python download_pretrain_data.py
+#   python download_pretrain_data.py "download.tasks=[walker-stand,cheetah-run]"
+#   python download_pretrain_data.py download.hf_split=expert
+
+# ─── HuggingFace source ───────────────────────────────────────────────────────
+hf_repo: nicklashansen/dreamer4
+hf_split: mixed-large           # subfolder in the dataset (mixed-large, expert, …)
+tasks: null                     # null → all TASK_SET tasks available in the HF split
+
+# ─── Environment ─────────────────────────────────────────────────────────────
+img_size: 128                   # output resolution for training
+hf_frame_size: 224              # frame size in HF PNGs (each PNG = H × H*N_frames)
+action_dim: 16                  # max action dim (shorter envs zero-padded)
+
+# ─── Output paths ────────────────────────────────────────────────────────────
+out_data_dir: ./data/pretrain/cycle0/demos
+out_frames_dir: ./data/pretrain/cycle0/frames
+tasks_json: ./data/pretrain/tasks.json
+shard_size: 2048
+overwrite: false                # skip tasks whose demo .pt already exists
+min_ep_frames: 16               # discard crashed episodes shorter than this
+
+# ─── Parallelism ─────────────────────────────────────────────────────────────
+num_workers: 4                  # parallel tasks (each spawns own DMControl env)
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+verbose: true

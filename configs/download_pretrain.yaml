@@ -1,0 +1,16 @@
+# configs/download_pretrain.yaml
+# Top-level config for download_pretrain_data.py
+#
+# Download pretrain data from HuggingFace and render pixel frames via DMControl.
+# Equivalent to collect_phase0_data.py but uses HF data instead of running a policy.
+#
+# Examples:
+#   python download_pretrain_data.py
+#   python download_pretrain_data.py "download.tasks=[walker-stand,walker-walk,cheetah-run]"
+#   python download_pretrain_data.py download.hf_split=expert download.out_data_dir=./data/expert/demos
+
+defaults:
+  - download: base
+  - _self_
+
+seed: 42

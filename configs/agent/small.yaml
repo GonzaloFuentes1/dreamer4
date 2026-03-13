@@ -1,0 +1,41 @@
+# configs/agent/small.yaml
+# Phase 3 — lightweight variant for debugging / single GPU.
+
+finetune_ckpt: ???
+
+packing_factor: 2
+d_model_dyn: 256
+dyn_depth: 4
+n_heads: 4
+dropout: 0.0
+mlp_ratio: 4.0
+time_every: 1
+n_register: 4
+n_agent: 1
+space_mode: wm_agent_isolated
+k_max: 8
+
+use_task_ids: false
+n_tasks: 128
+mtp_length: 8
+
+hidden_dim: 256
+action_dim: 16
+
+imagination_horizon: 8
+ctx_length: 8
+imagination_batch_size: 8
+max_ctx_len: 16
+eval_schedule: shortcut
+eval_d: 0.5
+
+gamma: 0.997
+lambda_: 0.95
+alpha: 0.5
+beta: 0.3
+critic_coef: 1.0
+
+lr: 3.0e-4
+weight_decay: 1.0e-5
+grad_clip: 100.0
+eval_every: 500

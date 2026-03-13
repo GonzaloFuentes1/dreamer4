@@ -36,9 +36,10 @@ class FrameDataModule(pl.LightningDataModule):
 
     def setup(self, stage: str):
         dc = self.cfg.data
+        tasks = list(dc.tasks) if dc.get("tasks") else TASK_SET
         self._dataset = ShardedFrameDataset(
             outdirs=list(dc.frame_dirs),
-            tasks=TASK_SET,
+            tasks=tasks,
             seq_len=int(dc.seq_len_tokenizer),
             iid_sampling=True,
         )

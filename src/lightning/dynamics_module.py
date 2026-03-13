@@ -19,12 +19,31 @@ def _load_frozen_tokenizer(ckpt_path: str, device: torch.device):
     """
     Load tokenizer checkpoint, return (encoder, decoder, tok_args).
     Identical logic to load_frozen_tokenizer_from_pt_ckpt in the original
-    train_dynamics.py — kept here to avoid cross-file imports during setup.
+    train_phase1b_dynamics.py — kept here to avoid cross-file imports during setup.
     """
     from model import Encoder, Decoder, Tokenizer
 
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    tok_args = dict(ckpt.get("args", {}))
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+    # Support both legacy raw-dict checkpoints and Lightning checkpoints.
+    if "state_dict" in ckpt:
+        # Lightning checkpoint: hyper_parameters holds the config,
+        # state_dict has keys prefixed with "model." (Tokenizer) and
+        # "lpips_loss." (LPIPS, not needed here).
+        hp = ckpt.get("hyper_parameters", {})
+        tc = hp.get("cfg", {}).get("tokenizer", {})
+        tok_args = dict(tc) if tc else {}
+
+        full_sd = ckpt["state_dict"]
+        model_sd = {
+            k[len("model."):]: v
+            for k, v in full_sd.items()
+            if k.startswith("model.")
+        }
+    else:
+        # Legacy format saved directly as a plain dict with "model" and "args".
+        tok_args = dict(ckpt.get("args", {}))
+        model_sd = ckpt["model"]
 
     H      = int(tok_args.get("H", 128))
     W      = int(tok_args.get("W", 128))
@@ -63,7 +82,7 @@ def _load_frozen_tokenizer(ckpt_path: str, device: torch.device):
     )
 
     tok = Tokenizer(enc, dec)
-    tok.load_state_dict(ckpt["model"], strict=True)
+    tok.load_state_dict(model_sd, strict=True)
     tok = tok.to(device)
     tok.eval()
     for p in tok.parameters():

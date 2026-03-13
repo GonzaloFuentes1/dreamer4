@@ -56,7 +56,7 @@ class ShardedFrameDataset(Dataset):
                     path = task_dir / fname
 
                     try:
-                        td = torch.load(path, map_location="cpu")
+                        td = torch.load(path, map_location="cpu", weights_only=False)
                     except Exception as e:
                         print(f"[ShardedFrameDataset] Skipping shard {path} (load error): {e}")
                         continue
@@ -100,7 +100,7 @@ class ShardedFrameDataset(Dataset):
     def _load_shard(self, path: str) -> torch.Tensor:
         if self._cache_path == path and self._cache_frames is not None:
             return self._cache_frames
-        td = torch.load(path, map_location="cpu")
+        td = torch.load(path, map_location="cpu", weights_only=False)
         frames = td["frames"]
         self._cache_path = path
         self._cache_frames = frames

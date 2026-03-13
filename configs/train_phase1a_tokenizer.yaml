@@ -19,7 +19,7 @@ trainer:
   log_every_n_steps: 100
   num_nodes: 1
   devices: 8
-  strategy: ddp
+  strategy: ddp_find_unused_parameters_true
   enable_progress_bar: true
 
 checkpoint:

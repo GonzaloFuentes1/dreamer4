@@ -1,5 +1,5 @@
 # losses.py
-# Standalone loss functions and sampling helpers extracted from train_dynamics.py.
+# Standalone loss functions and sampling helpers extracted from train_phase1b_dynamics.py.
 # model.py already contains recon_loss_from_mae and lpips_on_mae_recon — imported here
 # for convenience so callers can import everything loss-related from one place.
 
@@ -66,7 +66,7 @@ class LPIPSLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Shortcut / tau sampling helpers (moved from train_dynamics.py verbatim)
+# Shortcut / tau sampling helpers (moved from train_phase1b_dynamics.py verbatim)
 # ---------------------------------------------------------------------------
 
 def _emax_from_kmax(k_max: int) -> int:
@@ -131,7 +131,7 @@ def make_tau_schedule(*, k_max: int, schedule: str, d: Optional[float] = None) -
 
 
 # ---------------------------------------------------------------------------
-# Main dynamics pretraining loss (moved from train_dynamics.py verbatim)
+# Main dynamics pretraining loss (moved from train_phase1b_dynamics.py verbatim)
 # ---------------------------------------------------------------------------
 
 def dynamics_pretrain_loss(

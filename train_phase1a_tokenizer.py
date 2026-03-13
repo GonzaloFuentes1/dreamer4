@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# train_tokenizer.py — PyTorch Lightning + Hydra entry point
+# train_phase1a_tokenizer.py — PyTorch Lightning + Hydra entry point
 #
 # Usage (single GPU):
 #   python train_tokenizer.py trainer.devices=1
@@ -18,8 +18,7 @@
 import sys
 import os
 
-# Allow importing dreamer4 package modules without installing
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "dreamer4"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 import hydra
 import pytorch_lightning as pl
@@ -39,7 +38,7 @@ torch.backends.cudnn.allow_tf32 = True
 exec(torch_backends_setup)  # noqa: S102
 
 
-@hydra.main(config_path="configs", config_name="train_tokenizer", version_base=None)
+@hydra.main(config_path="configs", config_name="train_phase1a_tokenizer", version_base=None)
 def main(cfg: DictConfig) -> None:
     pl.seed_everything(cfg.seed, workers=True)
 

@@ -1,0 +1,16 @@
+# configs/collect_phase0.yaml
+# Top-level config for Phase 0 — episode collection.
+# Override via CLI: python collect_phase0_data.py collect=base collect.policy=agent collect.agent_ckpt=...
+#
+# Bootstrap (first cycle, no prior policy):
+#   python collect_phase0_data.py collect.out_data_dir=./data/cycle0/demos collect.out_frames_dir=./data/cycle0/frames
+#
+# Subsequent cycle with trained agent:
+#   python collect_phase0_data.py collect.policy=agent collect.agent_ckpt=./logs/agent_ckpts/last.ckpt \
+#       collect.out_data_dir=./data/cycle1/demos collect.out_frames_dir=./data/cycle1/frames
+
+defaults:
+  - collect: base
+  - _self_
+
+seed: 42

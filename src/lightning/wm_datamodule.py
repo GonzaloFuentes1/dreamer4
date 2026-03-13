@@ -38,6 +38,7 @@ class WMDataModule(pl.LightningDataModule):
     def setup(self, stage: str):
         dc  = self.cfg.data
         dyn = self.cfg.dynamics
+        tasks = list(dc.tasks) if dc.get("tasks") else TASK_SET
 
         is_rank0 = (not hasattr(self, "trainer")) or (self.trainer is None) or (self.trainer.global_rank == 0)
 
@@ -49,14 +50,14 @@ class WMDataModule(pl.LightningDataModule):
                 img_size=128,
                 action_dim=16,
                 tasks_json=str(dc.tasks_json),
-                tasks=TASK_SET,
+                tasks=tasks,
                 verbose=is_rank0,
             )
         else:
             from sharded_frame_dataset import ShardedFrameDataset
             self._dataset = ShardedFrameDataset(
                 outdirs=OmegaConf.to_container(dc.frame_dirs, resolve=True),
-                tasks=TASK_SET,
+                tasks=tasks,
                 seq_len=int(dc.seq_len_dynamics),
             )
 

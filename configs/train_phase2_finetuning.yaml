@@ -1,0 +1,36 @@
+# configs/train_agent_finetune.yaml
+# Top-level config for Phase 2 — agent finetuning (BC + reward model).
+# Composes finetune/base and data/local by default.
+# Override via CLI: python train_agent_finetune.py finetune=small data=cluster
+
+defaults:
+  - finetune: base
+  - data: local
+  - _self_
+
+seed: 0
+compile: false
+
+trainer:
+  max_steps: 2_000_000
+  precision: "16-mixed"
+  accumulate_grad_batches: 1
+  log_every_n_steps: 200
+  num_nodes: 1
+  devices: 8
+  strategy: ddp_find_unused_parameters_true
+  enable_progress_bar: true
+
+checkpoint:
+  dirpath: ./logs/finetune_ckpts
+  every_n_train_steps: 5000
+  save_top_k: -1
+  filename: "step_{step:07d}"
+
+wandb:
+  project: dreamer4-finetune
+  name: default
+  entity: null
+
+# Optional: resume from a Lightning checkpoint
+resume: null

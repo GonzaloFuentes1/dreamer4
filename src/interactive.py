@@ -243,7 +243,7 @@ def _get_state_dict(ckpt: dict) -> dict:
 
 
 def load_tokenizer_from_ckpt(tokenizer_ckpt: str, device: torch.device):
-    ckpt = torch.load(tokenizer_ckpt, map_location="cpu")
+    ckpt = torch.load(tokenizer_ckpt, map_location="cpu", weights_only=False)
     a = ckpt.get("args", {}) or {}
 
     H = int(a.get("H", 128))
@@ -307,7 +307,7 @@ def load_dynamics_from_ckpt(
     n_latents: int,
     packing_factor: int,
 ):
-    ckpt = torch.load(dynamics_ckpt, map_location="cpu")
+    ckpt = torch.load(dynamics_ckpt, map_location="cpu", weights_only=False)
     a = ckpt.get("args", {}) or {}
 
     d_model = int(a.get("d_model_dyn", a.get("dyn_d_model", a.get("d_model", 256))))
