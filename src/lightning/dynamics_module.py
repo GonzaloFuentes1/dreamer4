@@ -40,10 +40,18 @@ def _load_frozen_tokenizer(ckpt_path: str, device: torch.device):
             for k, v in full_sd.items()
             if k.startswith("model.")
         }
+        # Strip _orig_mod. prefix added by torch.compile()
+        model_sd = {
+            k.replace("_orig_mod.", ""): v for k, v in model_sd.items()
+        }
     else:
         # Legacy format saved directly as a plain dict with "model" and "args".
         tok_args = dict(ckpt.get("args", {}))
         model_sd = ckpt["model"]
+        # Strip _orig_mod. prefix added by torch.compile()
+        model_sd = {
+            k.replace("_orig_mod.", ""): v for k, v in model_sd.items()
+        }
 
     H      = int(tok_args.get("H", 128))
     W      = int(tok_args.get("W", 128))
@@ -52,21 +60,33 @@ def _load_frozen_tokenizer(ckpt_path: str, device: torch.device):
     n_patches = (H // patch) * (W // patch)
     d_patch   = patch * patch * C
 
-    enc = Encoder(
+    _enc_kwargs = dict(
         patch_dim=d_patch,
         d_model=int(tok_args.get("d_model", 256)),
         n_latents=int(tok_args.get("n_latents", 16)),
         n_patches=n_patches,
         n_heads=int(tok_args.get("n_heads", 4)),
         depth=int(tok_args.get("depth", 8)),
-        d_bottleneck=int(tok_args.get("d_bottleneck", 32)),
         dropout=0.0,
         mlp_ratio=float(tok_args.get("mlp_ratio", 4.0)),
         time_every=int(tok_args.get("time_every", 1)),
         latents_only_time=bool(tok_args.get("latents_only_time", True)),
         mae_p_min=0.0,
         mae_p_max=0.0,
+        scale_pos_embeds=bool(tok_args.get("scale_pos_embeds", True)),
     )
+    if tok_args.get("discrete", False):
+        from model import DiscreteEncoder
+        enc = DiscreteEncoder(
+            **_enc_kwargs,
+            n_categories=int(tok_args.get("d_bottleneck", 32)),
+            temperature=float(tok_args.get("temperature", 1.0)),
+        )
+    else:
+        enc = Encoder(
+            **_enc_kwargs,
+            d_bottleneck=int(tok_args.get("d_bottleneck", 32)),
+        )
     dec = Decoder(
         d_bottleneck=int(tok_args.get("d_bottleneck", 32)),
         d_model=int(tok_args.get("d_model", 256)),
@@ -79,6 +99,7 @@ def _load_frozen_tokenizer(ckpt_path: str, device: torch.device):
         mlp_ratio=float(tok_args.get("mlp_ratio", 4.0)),
         time_every=int(tok_args.get("time_every", 1)),
         latents_only_time=bool(tok_args.get("latents_only_time", True)),
+        scale_pos_embeds=bool(tok_args.get("scale_pos_embeds", True)),
     )
 
     tok = Tokenizer(enc, dec)
@@ -174,6 +195,7 @@ class DynamicsLightningModule(pl.LightningModule):
                 mlp_ratio=dc.mlp_ratio,
                 time_every=dc.time_every,
                 space_mode=dc.space_mode,
+                scale_pos_embeds=bool(dc.get("scale_pos_embeds", False)),
             )
             if self.cfg.get("compile", False):
                 self.dyn = torch.compile(self.dyn)
@@ -181,8 +203,8 @@ class DynamicsLightningModule(pl.LightningModule):
     def _encode_frames(self, frames: torch.Tensor) -> torch.Tensor:
         """Encode (B,T,C,H,W) float [0,1] -> (B,T,n_spatial,d_spatial) packed latents."""
         with torch.no_grad():
-            patches   = temporal_patchify(frames, self._patch)
-            z_btLd, _ = self._encoder(patches)
+            patches = temporal_patchify(frames, self._patch)
+            z_btLd  = self._encoder(patches)[0]   # [0] works for both Encoder (2-tuple) and DiscreteEncoder (3-tuple)
             return pack_bottleneck_to_spatial(z_btLd, n_spatial=self.n_spatial, k=self.packing_factor)
 
     # ------------------------------------------------------------------
@@ -260,10 +282,26 @@ class DynamicsLightningModule(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def configure_optimizers(self):
+        import math
         dc = self.cfg.dynamics
-        return torch.optim.AdamW(
+        opt = torch.optim.AdamW(
             self.dyn.parameters(),
             lr=dc.lr,
             weight_decay=dc.weight_decay,
             betas=(0.9, 0.999),
         )
+        warmup = int(dc.get("warmup_steps", 0))
+        total  = self.trainer.max_steps
+        if warmup > 0 and total > 0:
+            def lr_lambda(step: int) -> float:
+                if step < warmup:
+                    return step / max(1, warmup)
+                progress = (step - warmup) / max(1, total - warmup)
+                return 0.5 * (1.0 + math.cos(math.pi * progress))
+            sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+            return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
+        return opt
+
+    def configure_gradient_clipping(self, optimizer, gradient_clip_val=None, gradient_clip_algorithm=None):
+        clip = float(self.cfg.dynamics.get("grad_clip", 1.0))
+        self.clip_gradients(optimizer, gradient_clip_val=clip, gradient_clip_algorithm="norm")

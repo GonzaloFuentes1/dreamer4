@@ -1,0 +1,53 @@
+# configs/agent/base_128x128.yaml
+# Phase 3 — imagination training (PMPO, eq. 11) for base_128x128 dynamics.
+# Requires a Phase-2 finetune checkpoint trained with finetune/base_128x128.
+
+# Phase-2 checkpoint (required — set via CLI)
+finetune_ckpt: ???
+
+# ---- Dynamics architecture (must match finetune/base_128x128) ----------------
+packing_factor: 2
+d_model_dyn: 512
+dyn_depth: 8
+n_heads: 4
+dropout: 0.0
+mlp_ratio: 4.0
+time_every: 4
+n_register: 4
+n_agent: 1
+space_mode: wm_agent_isolated
+k_max: 8
+
+# ---- Task conditioning (must match Phase-2) ----------------------------------
+use_task_ids: false
+n_tasks: 128
+mtp_length: 8       # must match Phase-2 PolicyHead to load prior correctly
+
+# ---- Agent head architecture -------------------------------------------------
+hidden_dim: 512
+action_dim: 16
+
+# ---- Imagination rollout -----------------------------------------------------
+imagination_horizon: 15
+ctx_length: 16
+imagination_batch_size: 16
+max_ctx_len: 32
+eval_schedule: shortcut
+eval_d: 0.5
+
+# ---- RL hyperparameters (eqs. 10-11) ----------------------------------------
+gamma: 0.997             # discount factor (paper: 0.997)
+lambda_: 0.95            # λ-return weight
+alpha: 0.5               # PMPO balance between D+ and D- (paper: 0.5)
+beta: 0.3                # PMPO prior KL strength (paper: 0.3)
+critic_coef: 1.0         # weight on value-head twohot loss
+
+# ---- Optimizer ---------------------------------------------------------------
+lr: 5.0e-5
+weight_decay: 1.0e-5
+grad_clip: 100.0
+
+# ---- Evaluation / logging ----------------------------------------------------
+eval_every: 10000
+eval_n_episodes: 3       # episodes por task en evaluación online
+eval_episode_len: 1000   # pasos máximos por episodio

@@ -51,7 +51,7 @@ def log_tokenizer_viz_wandb(
     rfull_img  = temporal_unpatchify(recon_full_btnd,   H, W, C, patch)
 
     def tile_time(x: torch.Tensor) -> torch.Tensor:
-        x = x[:Tv]
+        x = x[:, :Tv]
         return x.permute(0, 2, 3, 1, 4).contiguous().view(x.shape[0], C, H, Tv * W)
 
     tgt = tile_time(target_img[:Bv])

@@ -39,9 +39,9 @@ from agent import PolicyHead, RewardHead
 # Checkpoint loader helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _load_frozen_encoder(ckpt_path: str, device: torch.device):
-    """Load tokenizer checkpoint → frozen Encoder + tok_args dict."""
-    from model import Encoder, Tokenizer
+def _load_frozen_tokenizer(ckpt_path: str, device: torch.device):
+    """Load tokenizer checkpoint → frozen Encoder + Decoder + tok_args dict."""
+    from model import Encoder, Decoder
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
@@ -52,9 +52,13 @@ def _load_frozen_encoder(ckpt_path: str, device: torch.device):
         tok_args = dict(tc) if tc else {}
         full_sd  = ckpt["state_dict"]
         model_sd = {k[len("model."):]: v for k, v in full_sd.items() if k.startswith("model.")}
+        # Strip _orig_mod. prefix added by torch.compile()
+        model_sd = {k.replace("_orig_mod.", ""): v for k, v in model_sd.items()}
     else:
         tok_args = dict(ckpt.get("args", {}))
         model_sd = ckpt["model"]
+        # Strip _orig_mod. prefix added by torch.compile()
+        model_sd = {k.replace("_orig_mod.", ""): v for k, v in model_sd.items()}
 
     H         = int(tok_args.get("H", 128))
     W         = int(tok_args.get("W", 128))
@@ -63,14 +67,13 @@ def _load_frozen_encoder(ckpt_path: str, device: torch.device):
     n_patches = (H // patch) * (W // patch)
     d_patch   = patch * patch * C
 
-    enc = Encoder(
+    _enc_kwargs = dict(
         patch_dim=d_patch,
         d_model=int(tok_args.get("d_model", 256)),
         n_latents=int(tok_args.get("n_latents", 16)),
         n_patches=n_patches,
         n_heads=int(tok_args.get("n_heads", 4)),
         depth=int(tok_args.get("depth", 8)),
-        d_bottleneck=int(tok_args.get("d_bottleneck", 32)),
         dropout=0.0,
         mlp_ratio=float(tok_args.get("mlp_ratio", 4.0)),
         time_every=int(tok_args.get("time_every", 1)),
@@ -78,12 +81,42 @@ def _load_frozen_encoder(ckpt_path: str, device: torch.device):
         mae_p_min=0.0,
         mae_p_max=0.0,
     )
+    if tok_args.get("discrete", False):
+        from model import DiscreteEncoder
+        enc = DiscreteEncoder(
+            **_enc_kwargs,
+            n_categories=int(tok_args.get("d_bottleneck", 32)),
+            temperature=float(tok_args.get("temperature", 1.0)),
+        )
+    else:
+        enc = Encoder(
+            **_enc_kwargs,
+            d_bottleneck=int(tok_args.get("d_bottleneck", 32)),
+        )
+    dec = Decoder(
+        d_bottleneck=int(tok_args.get("d_bottleneck", 32)),
+        d_model=int(tok_args.get("d_model", 256)),
+        n_heads=int(tok_args.get("n_heads", 4)),
+        depth=int(tok_args.get("depth", 8)),
+        n_latents=int(tok_args.get("n_latents", 16)),
+        n_patches=n_patches,
+        d_patch=d_patch,
+        dropout=0.0,
+        mlp_ratio=float(tok_args.get("mlp_ratio", 4.0)),
+        time_every=int(tok_args.get("time_every", 1)),
+        latents_only_time=bool(tok_args.get("latents_only_time", True)),
+    )
     enc_sd = {k[len("encoder."):]: v for k, v in model_sd.items() if k.startswith("encoder.")}
+    dec_sd = {k[len("decoder."):]: v for k, v in model_sd.items() if k.startswith("decoder.")}
     enc.load_state_dict(enc_sd, strict=True)
+    dec.load_state_dict(dec_sd, strict=True)
     enc = enc.to(device).eval()
+    dec = dec.to(device).eval()
     for p in enc.parameters():
         p.requires_grad_(False)
-    return enc, tok_args
+    for p in dec.parameters():
+        p.requires_grad_(False)
+    return enc, dec, tok_args
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,8 +159,9 @@ class FinetuneLightningModule(pl.LightningModule):
         ft = self.cfg.finetune
 
         # ---- Frozen encoder (stays outside DDP / optimizer) ----------
-        encoder, tok_args = _load_frozen_encoder(ft.tokenizer_ckpt, self.device)
+        encoder, decoder, tok_args = _load_frozen_tokenizer(ft.tokenizer_ckpt, self.device)
         object.__setattr__(self, "_encoder", encoder)
+        object.__setattr__(self, "_decoder", decoder)
 
         self._tok_args       = tok_args
         self._patch          = int(tok_args.get("patch",        4))
@@ -206,9 +240,9 @@ class FinetuneLightningModule(pl.LightningModule):
     @torch.no_grad()
     def _encode_frames(self, obs_u8: torch.Tensor) -> torch.Tensor:
         """(B,T,3,H,W) uint8 → (B,T,n_spatial,d_spatial) packed latents."""
-        frames    = obs_u8.float() / 255.0
-        patches   = temporal_patchify(frames, self._patch)
-        z_btLd, _ = self._encoder(patches)
+        frames  = obs_u8.float() / 255.0
+        patches = temporal_patchify(frames, self._patch)
+        z_btLd  = self._encoder(patches)[0]   # [0] works for both Encoder and DiscreteEncoder
         return pack_bottleneck_to_spatial(z_btLd, n_spatial=self.n_spatial, k=self.packing_factor)
 
     def _task_tokens(self, batch: Dict, B: int, T: int) -> torch.Tensor:
@@ -293,7 +327,40 @@ class FinetuneLightningModule(pl.LightningModule):
             "stats/B_self":       float(B_self),
         }, on_step=True, on_epoch=False, prog_bar=True, sync_dist=False)
 
+        self._last_frames = obs_u8[:, :-1].float().div(255.0)
+        self._last_actions = act_shifted
+        self._last_act_mask = mask_shifted
+
         return loss
+
+    # ------------------------------------------------------------------
+    # Checkpoint hooks — persist frozen encoder for Phase 3
+    # ------------------------------------------------------------------
+
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """Strip _encoder.* keys injected by on_save_checkpoint.
+
+        Lightning calls load_state_dict BEFORE setup(), so _encoder is not yet
+        registered as a module.  Removing these keys prevents the
+        'Unexpected key(s)' RuntimeError; the encoder is re-loaded from disk
+        inside setup() anyway.
+        """
+        sd = checkpoint.get("state_dict", {})
+        for key in [k for k in sd if k.startswith("_encoder.")]:
+            del sd[key]
+
+    def on_save_checkpoint(self, checkpoint: dict) -> None:
+        """Inject frozen encoder weights into the Lightning checkpoint.
+
+        Phase 3 (_load_finetune_checkpoint) looks for '_encoder.*' keys in the
+        state_dict and tok_args at the top level.  Without this hook, the encoder
+        is stored via object.__setattr__ and never reaches the Lightning state_dict,
+        so Phase 3 would start with a randomly-initialised encoder.
+        """
+        enc_sd = {f"_encoder.{k}": v for k, v in self._encoder.state_dict().items()}
+        checkpoint["state_dict"].update(enc_sd)
+        if self._tok_args is not None:
+            checkpoint["tok_args"] = dict(self._tok_args)
 
     # ------------------------------------------------------------------
     # Optimizer — dynamics + task_embedder + heads

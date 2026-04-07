@@ -2,7 +2,7 @@
 # Top-level config for download_pretrain_data.py
 #
 # Download pretrain data from HuggingFace and render pixel frames via DMControl.
-# Equivalent to collect_phase0_data.py but uses HF data instead of running a policy.
+# Equivalent to train_phase0_collect_episodes.py but uses HF data instead of running a policy.
 #
 # Examples:
 #   python download_pretrain_data.py
@@ -14,3 +14,10 @@ defaults:
   - _self_
 
 seed: 42
+
+hydra:
+  run:
+    dir: ${hydra:runtime.cwd}/logs/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${hydra:runtime.cwd}/logs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra:job.num}

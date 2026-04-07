@@ -85,9 +85,18 @@ class DynamicsEvalCallback(pl.Callback):
         if frames is None:
             return
 
-        dc = pl_module.cfg.dynamics
-        B_eval = min(frames.shape[0], int(dc.eval_batch_size))
-        sched  = make_tau_schedule(k_max=int(dc.k_max), schedule=str(dc.eval_schedule), d=float(dc.eval_d))
+        eval_cfg = getattr(pl_module.cfg, "dynamics", None)
+        if eval_cfg is None:
+            eval_cfg = getattr(pl_module.cfg, "finetune", None)
+        if eval_cfg is None:
+            return
+
+        B_eval = min(frames.shape[0], int(eval_cfg.eval_batch_size))
+        sched  = make_tau_schedule(
+            k_max=int(eval_cfg.k_max),
+            schedule=str(eval_cfg.get("eval_schedule", "shortcut")),
+            d=float(eval_cfg.get("eval_d", 0.25)),
+        )
 
         with torch.no_grad():
             run_dynamics_eval(
@@ -102,11 +111,11 @@ class DynamicsEvalCallback(pl.Callback):
                 C=pl_module._C,
                 patch=pl_module._patch,
                 packing_factor=pl_module.packing_factor,
-                k_max=int(dc.k_max),
-                ctx_length=int(dc.eval_ctx),
-                horizon=int(dc.eval_horizon),
+                k_max=int(eval_cfg.k_max),
+                ctx_length=int(eval_cfg.eval_ctx),
+                horizon=int(eval_cfg.get("eval_horizon", 16)),
                 sched=sched,
-                max_items=int(dc.eval_max_items),
+                max_items=int(eval_cfg.get("eval_max_items", 4)),
                 step=step,
             )
 
@@ -222,7 +231,24 @@ class AgentEvalCallback(pl.Callback):
         import numpy as np
         import wandb
 
-        os.environ.setdefault("MUJOCO_GL", "egl")
+        os.environ["MUJOCO_GL"] = "egl"
+        os.environ["PYOPENGL_PLATFORM"] = "egl"
+        os.environ["EGL_LOG_LEVEL"] = "fatal"   # suprime los "failed to create dri2 screen"
+
+        if pl_module.device.type == "cuda":
+            # Si slurm asignó por ej `CUDA_VISIBLE_DEVICES="4,5"`, sacamos el primero visible real
+            # En configuraciones pl.Trainer dist, a veces dependemos del local_rank / gpu_id
+            gpu_id = os.environ.get("EGL_DEVICE_ID", os.environ.get("CUDA_VISIBLE_DEVICES", str(pl_module.device.index or 0))).split(",")[0]
+            os.environ["EGL_DEVICE_ID"] = str(gpu_id)
+
+        # Evita que intente abrir una ventana X11 real
+        os.environ["DISPLAY"] = ""
+
+        try:
+            from dm_control import mujoco
+            mujoco.Physics.from_xml_string('<mujoco></mujoco>')
+        except Exception:
+            pass
 
         try:
             from dm_control import suite
@@ -258,8 +284,18 @@ class AgentEvalCallback(pl.Callback):
             except Exception:
                 continue
 
-            # Task embedding (lang_emb = zeros — tasks.json not required here)
+# Task embedding 
             task_inp = torch.zeros(1, 512, device=device)
+            try:
+                import json, os
+                tasks_file = os.path.join(os.path.dirname(__file__), "..", "..", "tasks.json")
+                if os.path.exists(tasks_file):
+                    with open(tasks_file, "r") as jf:
+                        t_meta = json.load(jf)
+                        if task in t_meta and "text_embedding" in t_meta[task]:
+                            task_inp = torch.tensor(t_meta[task]["text_embedding"], device=device).unsqueeze(0)
+            except Exception as e:
+                print(f"[EvalCallback] Aviso: no se pudo cargar lang_emb ({e})")
             ep_returns = []
 
             for _ in range(self.n_episodes):

@@ -9,7 +9,7 @@
 ```mermaid
 flowchart TD
     subgraph P0["Phase 0 — Colección de episodios (ciclo N)"]
-        COL["collect_phase0_data.py\ncollect_phase0.yaml"]
+        COL["scripts/pipeline/train_phase0_collect_episodes.py\ncollect_phase0.yaml"]
         ENV["DMControl\n(30 tareas)"]
         RPOL["Política random\n(bootstrap, ciclo 0)"]
         APOL["Política entrenada\n(agent.ckpt, ciclos ≥1)"]
@@ -36,7 +36,7 @@ flowchart TD
     end
 
     subgraph P1A["Fase 1a — Tokenizer"]
-        TT["train_phase1a_tokenizer.py"]
+        TT["scripts/pipeline/train_phase1a_tokenizer.py"]
         TLM["TokenizerLightningModule\nlightning/tokenizer_module.py"]
         TOK["Tokenizer\n(Encoder + Decoder)\nsrc/model.py"]
         FDM --> TLM
@@ -45,7 +45,7 @@ flowchart TD
     end
 
     subgraph P1B["Fase 1b — Dynamics"]
-        TD["train_phase1b_dynamics.py"]
+        TD["scripts/pipeline/train_phase1b_dynamics.py"]
         DLM["DynamicsLightningModule\nlightning/dynamics_module.py"]
         DYN["Dynamics\n(BlockCausalTransformer)\nsrc/model.py"]
         TCKPT -. "frozen Encoder" .-> DLM
@@ -55,7 +55,7 @@ flowchart TD
     end
 
     subgraph P2["Fase 2 — Finetune (BC + Reward)"]
-        TF["train_phase2_finetuning.py"]
+        TF["scripts/pipeline/train_phase2_finetuning.py"]
         FLM["FinetuneLightningModule\nlightning/finetune_module.py"]
         PH2["PolicyHead  MTP L=8\nsrc/agent.py"]
         RH["RewardHead  MTP L=8\nsrc/agent.py"]
@@ -69,7 +69,7 @@ flowchart TD
     end
 
     subgraph P3["Fase 3 — Agent (PMPO)"]
-        TA["train_phase3_imagination.py"]
+        TA["scripts/pipeline/train_phase3_imagination.py"]
         ALM["AgentLightningModule\nlightning/agent_module.py"]
         PH3["PolicyHead trainable\n+ policy_prior frozen"]
         VH["ValueHead\nsrc/agent.py"]

@@ -6,7 +6,7 @@ import torch
 from torchvision.io import read_image
 import torch.nn.functional as F
 
-from task_set import TASK_SET
+from src.task_set import TASK_SET
 
 
 FILEDIR = "/<path>/expert"        # raw data source

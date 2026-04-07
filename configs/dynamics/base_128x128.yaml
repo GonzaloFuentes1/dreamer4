@@ -1,0 +1,40 @@
+# configs/dynamics/base_128x128.yaml
+# Dynamics for 128×128 tokenizer, aligned with nicklashansen/dreamer4.
+# n_latents=16, packing_factor=2 → n_spatial=8, d_spatial=64
+# 16 tokens/step: 1 act + 1 sig + 1 step + 8 spatial + 4 reg + 1 agent
+
+tokenizer_ckpt: ???
+packing_factor: 2
+
+# Architecture
+d_model_dyn: 512
+dyn_depth: 8
+n_heads: 4
+dropout: 0.0
+mlp_ratio: 4.0
+time_every: 4
+n_register: 4
+n_agent: 1
+space_mode: wm_agent_isolated
+scale_pos_embeds: false
+k_max: 8
+
+# Shortcut / bootstrapping
+bootstrap_start: 5000
+self_fraction: 0.25
+use_actions: true
+
+# Optimizer
+lr: 1.0e-4
+weight_decay: 1.0e-2
+warmup_steps: 500
+grad_clip: 1.0
+
+# Evaluation
+eval_every: 10000
+eval_batch_size: 4
+eval_max_items: 4
+eval_ctx: 8
+eval_horizon: 16
+eval_schedule: shortcut
+eval_d: 0.25

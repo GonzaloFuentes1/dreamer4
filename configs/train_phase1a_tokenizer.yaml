@@ -9,21 +9,21 @@ defaults:
   - _self_
 
 seed: 0
-compile: false
+compile: true
 
 trainer:
   max_steps: 10_000_000
-  precision: "16-mixed"
+  precision: "bf16-mixed"
   accumulate_grad_batches: 1
   gradient_clip_val: null
-  log_every_n_steps: 100
+  log_every_n_steps: 5
   num_nodes: 1
   devices: 8
-  strategy: ddp_find_unused_parameters_true
+  strategy: ddp
   enable_progress_bar: true
 
 checkpoint:
-  dirpath: ./logs/tokenizer_ckpts
+  dirpath: ./checkpoints/tokenizer_ckpts
   every_n_train_steps: 5000
   save_top_k: -1
   filename: "step_{step:07d}"
@@ -35,3 +35,10 @@ wandb:
 
 # Optional: path to resume from (Lightning .ckpt format)
 resume: null
+
+hydra:
+  run:
+    dir: ${hydra:runtime.cwd}/logs/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${hydra:runtime.cwd}/logs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra:job.num}

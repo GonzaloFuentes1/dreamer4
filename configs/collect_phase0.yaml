@@ -1,16 +1,31 @@
 # configs/collect_phase0.yaml
 # Top-level config for Phase 0 — episode collection.
-# Override via CLI: python collect_phase0_data.py collect=base collect.policy=agent collect.agent_ckpt=...
+# Override via CLI: python scripts/pipeline/train_phase0_collect_episodes.py collect=base collect.policy=agent collect.agent_ckpt=...
 #
 # Bootstrap (first cycle, no prior policy):
-#   python collect_phase0_data.py collect.out_data_dir=./data/cycle0/demos collect.out_frames_dir=./data/cycle0/frames
+#   python scripts/pipeline/train_phase0_collect_episodes.py collect.out_data_dir=./data/cycle0/demos collect.out_frames_dir=./data/cycle0/frames
 #
 # Subsequent cycle with trained agent:
-#   python collect_phase0_data.py collect.policy=agent collect.agent_ckpt=./logs/agent_ckpts/last.ckpt \
+#   python scripts/pipeline/train_phase0_collect_episodes.py collect.policy=agent collect.agent_ckpt=./logs/agent_ckpts/last.ckpt \
 #       collect.out_data_dir=./data/cycle1/demos collect.out_frames_dir=./data/cycle1/frames
+#
+# Non-MuJoCo stable preset:
+#   python scripts/pipeline/train_phase0_collect_episodes.py collect=non_mujoco_stable \
+#       collect.out_data_dir=./data/non_mujoco/demos collect.out_frames_dir=./data/non_mujoco/frames
+#
+# Stage-0 production preset (mixed domains):
+#   python scripts/pipeline/train_phase0_collect_episodes.py collect=stage0_collect \
+#       collect.out_data_dir=./data/stage0/demos collect.out_frames_dir=./data/stage0/frames
 
 defaults:
   - collect: base
   - _self_
 
 seed: 42
+
+hydra:
+  run:
+    dir: ${hydra:runtime.cwd}/logs/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${hydra:runtime.cwd}/logs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra:job.num}

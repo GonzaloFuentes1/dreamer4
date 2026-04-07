@@ -142,6 +142,34 @@ class WMDataset(Dataset):
         self._lang_embs = []
 
         total = 0
+
+        def _normalize_action_tensor(act_t: torch.Tensor, target_dim: int) -> torch.Tensor:
+            """
+            Devuelve acciones con shape (N, target_dim), robusto a formatos legacy:
+            - (N,) -> (N,1)
+            - (N,d) -> (N,d)
+            - (N,*,d) -> (N,d) aplanando ejes intermedios
+            Luego aplica pad/truncado a target_dim.
+            """
+            if act_t.ndim == 0:
+                act_t = act_t.view(1, 1)
+            elif act_t.ndim == 1:
+                act_t = act_t.unsqueeze(-1)
+            elif act_t.ndim > 2:
+                act_t = act_t.reshape(act_t.shape[0], -1)
+
+            act_t = act_t.to(torch.float32)
+
+            in_dim = int(act_t.shape[-1])
+            if in_dim == target_dim:
+                return act_t
+
+            out = torch.zeros(act_t.shape[0], target_dim, dtype=torch.float32)
+            copy_dim = min(in_dim, target_dim)
+            if copy_dim > 0:
+                out[:, :copy_dim] = act_t[:, :copy_dim]
+            return out
+
         for task in tasks:
             # --- NEW: gather segments for this task from each (data_dir, frames_dir) source ---
             seg_eps = []
@@ -184,6 +212,16 @@ class WMDataset(Dataset):
                 if act.ndim == 1:
                     act = act.unsqueeze(-1)
                 act = act.to(torch.float32)
+
+                # Normaliza ancho de acciones entre fuentes (p.ej., 6 vs 16):
+                # - si viene menor, pad con ceros hasta self.A
+                # - si viene mayor, truncamos a self.A
+                act_in_dim = int(act.shape[-1]) if act.ndim >= 2 else 1
+                act = _normalize_action_tensor(act, self.A)
+                if self.verbose and act_in_dim != self.A:
+                    print(
+                        f"[WMDataset] task={task} source=({dd},{fd}): action_dim {act_in_dim} -> {self.A}",
+                    )
 
                 N = int(rew.shape[0])
                 if act.shape[0] != N or ep.shape[0] != N:
@@ -231,6 +269,9 @@ class WMDataset(Dataset):
                 if self.verbose:
                     print(f"[WMDataset] Skipping task={task}: missing demo+shards across all sources.")
                 continue
+
+            # Defensa final ante formatos legacy mezclados entre fuentes.
+            seg_acts = [_normalize_action_tensor(a, self.A) for a in seg_acts]
 
             # Concatenate segments for this task
             ep = torch.cat(seg_eps, dim=0)

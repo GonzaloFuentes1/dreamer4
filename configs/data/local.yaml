@@ -29,5 +29,8 @@ batch_size_tokenizer: 8
 seq_len_dynamics: 32
 batch_size_dynamics: 24
 
+# Image resolution (must match collected frames)
+img_size: 128
+
 # Shared
 num_workers: 8

@@ -20,6 +20,10 @@ dependencies = [
     "omegaconf==2.3.0",
     "dm-control>=1.0.0",
     "mujoco>=3.0.0",
+    "jax<0.6.0",
+    "jaxlib<0.6.0",
+    "gymnasium[atari,accept-rom-license]",
+    "envpool",
 ]
 
 [tool.uv]

@@ -1,0 +1,708 @@
+\documentclass[aspectratio=169, 12pt]{beamer}
+
+% ── Tema ────────────────────────────────────────────────────────────────────
+\usetheme{Madrid}
+\usecolortheme{default}
+\setbeamercolor{palette primary}{bg=black!85, fg=white}
+\setbeamercolor{palette secondary}{bg=black!70, fg=white}
+\setbeamercolor{palette tertiary}{bg=black!60, fg=white}
+\setbeamercolor{palette quaternary}{bg=black!50, fg=white}
+\setbeamercolor{structure}{fg=black!80}
+\setbeamercolor{block title}{bg=black!80, fg=white}
+\setbeamercolor{block body}{bg=black!5}
+\setbeamercolor{alerted text}{fg=orange!80!black}
+\setbeamerfont{block title}{series=\bfseries}
+\setbeamerfont{title}{size=\Large, series=\bfseries}
+\setbeamerfont{frametitle}{series=\bfseries}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+
+% ── Paquetes ─────────────────────────────────────────────────────────────────
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, fit, backgrounds}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{fontawesome5}
+
+% ── Colores custom ───────────────────────────────────────────────────────────
+\definecolor{phaseA}{RGB}{52,  120, 180}
+\definecolor{phaseB}{RGB}{200,  80,  40}
+\definecolor{phaseC}{RGB}{  0, 150,  80}
+\definecolor{phaseD}{RGB}{150,  60, 200}
+\definecolor{darkgray}{RGB}{50,50,50}
+
+% ── Metadata ─────────────────────────────────────────────────────────────────
+\title{\textbf{DreamerV4}\\[4pt]
+       \large Aprendizaje de Modelos de Mundo para Control de Largo Plazo}
+\subtitle{Hansen et al., 2025 — \texttt{arXiv:2509.24527}}
+\author{Gonzalo Fuentes}
+\institute{Magíster en Ciencias de la Computación}
+\date{\today}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+
+% ── Portada ──────────────────────────────────────────────────────────────────
+\begin{frame}
+\titlepage
+\end{frame}
+
+% ── Índice ───────────────────────────────────────────────────────────────────
+\begin{frame}{Contenidos}
+\tableofcontents
+\end{frame}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Motivación y Contexto}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{frame}{¿Por qué Modelos de Mundo?}
+\begin{columns}[T]
+  \begin{column}{0.5\textwidth}
+    \textbf{El problema del RL model-free:}
+    \begin{itemize}
+      \item Requiere millones de interacciones reales con el entorno
+      \item Muestras costosas en robots físicos o simulaciones complejas
+      \item No aprovecha la estructura temporal de las observaciones
+    \end{itemize}
+    \vspace{8pt}
+    \textbf{La promesa de los modelos de mundo:}
+    \begin{itemize}
+      \item Aprender una representación latente del entorno
+      \item Predecir consecuencias de acciones \emph{sin ejecutarlas}
+      \item Entrenar la política en \alert{imaginación} — infinitas muestras gratis
+    \end{itemize}
+  \end{column}
+  \begin{column}{0.48\textwidth}
+    \begin{block}{Línea de investigación}
+      \centering
+      \vspace{4pt}
+      \textbf{DreamerV1} (2019) $\rightarrow$ aprendizaje por RSSM\\[4pt]
+      \textbf{DreamerV2} (2020) $\rightarrow$ representaciones discretas\\[4pt]
+      \textbf{DreamerV3} (2023) $\rightarrow$ generalización multi-tarea\\[4pt]
+      \textbf{DreamerV4} (2025) $\rightarrow$ \alert{transformers + flow matching}
+    \end{block}
+    \vspace{8pt}
+    \small DreamerV4 escala a imágenes de alta resolución y control de largo horizonte, superando a DreamerV3 y TD-MPC2.
+  \end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Desafíos del Control Visual a Largo Plazo}
+\begin{columns}[T]
+  \begin{column}{0.55\textwidth}
+    \begin{enumerate}
+      \item \textbf{Alta dimensionalidad:} imágenes $128{\times}128{\times}3$ son espacio de observación enorme
+      \vspace{6pt}
+      \item \textbf{Dependencias temporales largas:} las recompensas pueden estar distantes en el tiempo de las acciones que las causaron
+      \vspace{6pt}
+      \item \textbf{Eficiencia de muestras:} los entornos físicos/costosos requieren aprender con pocos datos reales
+      \vspace{6pt}
+      \item \textbf{Calidad de imaginación:} errores en el modelo se acumulan en rollouts de largo horizonte (\emph{compounding errors})
+    \end{enumerate}
+  \end{column}
+  \begin{column}{0.42\textwidth}
+    \begin{alertblock}{Contribución central}
+      DreamerV4 propone un \textbf{pipeline de 4 fases} que separa explícitamente:
+      \begin{itemize}
+        \item Percepción (tokenizer MAE)
+        \item Dinámica (flow matching)
+        \item Comportamiento (finetune BC+reward)
+        \item Política (PMPO en imaginación)
+      \end{itemize}
+    \end{alertblock}
+  \end{column}
+\end{columns}
+\end{frame}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Visión General del Sistema}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{frame}{Pipeline de 4 Fases}
+\centering
+\begin{tikzpicture}[
+  box/.style={rectangle, rounded corners=6pt, minimum width=2.8cm, minimum height=1.1cm,
+              text centered, font=\small\bfseries, text=white},
+  arr/.style={-{Latex[length=4pt]}, thick},
+  node distance=0.55cm
+]
+  \node[box, fill=phaseA] (tok)  {\faEye\\ Tokenizer};
+  \node[box, fill=phaseB, right=of tok] (dyn) {\faBrain\\ Dynamics};
+  \node[box, fill=phaseC, right=of dyn] (ft)  {\faGraduationCap\\ Finetune};
+  \node[box, fill=phaseD, right=of ft]  (agt) {\faRobot\\ Agent};
+
+  \draw[arr] (tok) -- (dyn);
+  \draw[arr] (dyn) -- (ft);
+  \draw[arr] (ft)  -- (agt);
+
+  \node[above=0.3cm of tok, font=\footnotesize, text=phaseA] {Fase 1a};
+  \node[above=0.3cm of dyn, font=\footnotesize, text=phaseB] {Fase 1b};
+  \node[above=0.3cm of ft,  font=\footnotesize, text=phaseC] {Fase 2};
+  \node[above=0.3cm of agt, font=\footnotesize, text=phaseD] {Fase 3};
+
+  \node[below=0.35cm of tok, font=\tiny, text=darkgray, align=center] {MAE\\compresión};
+  \node[below=0.35cm of dyn, font=\tiny, text=darkgray, align=center] {Flow\\matching};
+  \node[below=0.35cm of ft,  font=\tiny, text=darkgray, align=center] {BC +\\reward};
+  \node[below=0.35cm of agt, font=\tiny, text=darkgray, align=center] {PMPO\\imaginación};
+
+  % Ciclo de recolección
+  \node[box, fill=darkgray, minimum width=12.8cm, minimum height=0.75cm,
+        below=1.1cm of dyn] (collect) {\faDatabase\quad Recolección de datos (ciclo activo: política aleatoria $\to$ agente)};
+
+  \draw[arr, gray] (agt.south) -- ++(0,-0.42) -- ++(-11.15,0) -- (collect.north west);
+  \draw[arr, gray] (collect.north) -- ++(0,0.42);
+\end{tikzpicture}
+
+\vspace{10pt}
+\begin{columns}[T]
+  \begin{column}{0.24\textwidth}
+    \small\textbf{\color{phaseA}Tokenizer:} codifica frames en tokens latentes comprimidos
+  \end{column}
+  \begin{column}{0.24\textwidth}
+    \small\textbf{\color{phaseB}Dynamics:} predice estados futuros en espacio latente
+  \end{column}
+  \begin{column}{0.24\textwidth}
+    \small\textbf{\color{phaseC}Finetune:} aprende comportamiento y valor desde datos reales
+  \end{column}
+  \begin{column}{0.24\textwidth}
+    \small\textbf{\color{phaseD}Agent:} mejora política en rollouts imaginados
+  \end{column}
+\end{columns}
+\end{frame}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Tokenizer (Fase 1a)}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{frame}{Tokenizer: Arquitectura MAE Temporal}
+\begin{columns}[T]
+  \begin{column}{0.54\textwidth}
+    \textbf{Objetivo:} comprimir frames de observación en representaciones latentes compactas.
+
+    \vspace{8pt}
+    \textbf{Arquitectura:}
+    \begin{itemize}
+      \item \textbf{Patchificación:} imagen $H{\times}W$ dividida en parches $p{\times}p$ píxeles
+      \item \textbf{Encoder} (Transformer bloque-causal):
+            \begin{itemize}\small
+              \item Atención espacial: latentes ven todos los parches; parches ven solo su modalidad
+              \item Atención temporal: causal (pasado + presente)
+            \end{itemize}
+      \item \textbf{Bottleneck:} proyección a $d_b$ dims + $\tanh$ — fuerza compresión
+      \item \textbf{Decoder:} reconstruye parches desde latentes via cross-attention
+    \end{itemize}
+  \end{column}
+  \begin{column}{0.44\textwidth}
+    \begin{block}{Entrenamiento MAE}
+      \textbf{Masked Autoencoder:}
+      \begin{itemize}
+        \item Enmascara 0--90\% de parches aleatoriamente
+        \item El encoder opera \emph{solo} sobre parches visibles + tokens latentes
+        \item El decoder reconstruye \textbf{todos} los parches
+        \item Pérdida: MSE + LPIPS (perceptual)
+      \end{itemize}
+    \end{block}
+    \vspace{6pt}
+    \begin{exampleblock}{Ventaja del masking agresivo}
+      Con 90\% enmascarado, el bottleneck \emph{debe} comprimir información global del frame — imposible hacer trampa viendo los parches locales
+    \end{exampleblock}
+  \end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Tokenizer: Compresión y Representación Espacial}
+\begin{columns}[T]
+  \begin{column}{0.5\textwidth}
+    \textbf{Flujo de datos:}
+    \vspace{4pt}
+
+    \begin{tikzpicture}[scale=0.85, every node/.style={font=\scriptsize}]
+      \node[draw, fill=phaseA!20, rounded corners, minimum width=3cm, minimum height=0.6cm]
+           (img) at (0,0) {Frame $128{\times}128{\times}3$};
+      \node[draw, fill=phaseA!20, rounded corners, minimum width=3cm, minimum height=0.6cm]
+           (pat) at (0,-1.0) {$N_p$ parches, $d_p$ dims};
+      \node[draw, fill=phaseA!40, rounded corners, minimum width=3cm, minimum height=0.6cm]
+           (enc) at (0,-2.0) {Encoder Transformer};
+      \node[draw, fill=orange!30, rounded corners, minimum width=3cm, minimum height=0.6cm]
+           (bot) at (0,-3.0) {$N_L \times d_b$ latentes};
+      \node[draw, fill=phaseB!30, rounded corners, minimum width=3cm, minimum height=0.6cm]
+           (pak) at (0,-4.0) {Packing $\to N_z \times d_z$ espacial};
+
+      \draw[-{Latex}, thick] (img)--(pat) node[midway,right,xshift=2pt]{patchify};
+      \draw[-{Latex}, thick] (pat)--(enc) node[midway,right,xshift=2pt]{proyección};
+      \draw[-{Latex}, thick] (enc)--(bot) node[midway,right,xshift=2pt]{bottleneck $+\tanh$};
+      \draw[-{Latex}, thick] (bot)--(pak) node[midway,right,xshift=2pt]{reshape};
+    \end{tikzpicture}
+  \end{column}
+  \begin{column}{0.48\textwidth}
+    \textbf{Operación de Packing:}
+    \vspace{6pt}
+
+    Los latentes $N_L \times d_b$ se \emph{reempaquetan} en tokens espaciales para el modelo de dinámica:
+    \[
+      (B,\,T,\,N_L,\,d_b) \;\xrightarrow{\text{reshape}}\; (B,\,T,\,N_z,\,d_z)
+    \]
+    donde $N_z = N_L / k$ y $d_z = d_b \cdot k$
+
+    \vspace{8pt}
+    \begin{block}{Nuestra configuración}
+      \begin{tabular}{ll}
+        $p$ (patch size) & 4 px \\
+        $N_p$ (parches)  & 1024 \\
+        $N_L$ (latentes) & 32 \\
+        $d_b$ (bottleneck) & 32 \\
+        $k$ (packing)    & 2 \\
+        $N_z$ (espacial) & 16 \\
+        Compresión       & \textbf{32:1} \\
+      \end{tabular}
+    \end{block}
+  \end{column}
+\end{columns}
+\end{frame}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Dynamics (Fase 1b)}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{frame}{Dynamics: Flow Matching con Shortcut Forcing}
+\begin{columns}[T]
+  \begin{column}{0.5\textwidth}
+    \textbf{Objetivo:} dado el historial de estados latentes $z_{1:t}$ y acciones $a_{1:t}$, predecir $z_{t+1}$.
+
+    \vspace{8pt}
+    \textbf{¿Por qué Flow Matching?}
+    \begin{itemize}
+      \item Aprende distribuciones multimodales (el futuro puede ser ambiguo)
+      \item Más estable que difusión: predice velocidad, no ruido
+      \item Permite \emph{shortcuts}: inferencia en 1--4 pasos en lugar de 1000
+    \end{itemize}
+
+    \vspace{8pt}
+    \textbf{Proceso de corrupción:}
+    \[
+      \tilde{z} = (1-\sigma)\,\epsilon + \sigma\, z^* , \quad \epsilon \sim \mathcal{N}(0,I)
+    \]
+    El modelo predice la \textbf{velocidad} $v = \frac{z^* - \tilde{z}}{1-\sigma}$
+  \end{column}
+  \begin{column}{0.48\textwidth}
+    \begin{alertblock}{Shortcut Forcing}
+      Innovación clave: impone consistencia \emph{entre niveles de ruido}.
+
+      \vspace{4pt}
+      Si el modelo predice bien $z^*$ desde $\tilde{z}_{\sigma}$, también debe predecir bien desde el punto intermedio $\tilde{z}_{\sigma/2}$.
+
+      \vspace{4pt}
+      Esto permite hacer inferencia con muy pocos pasos ODE en deployment ($k{=}2$--$4$ pasos vs $1000$ en DDPM).
+    \end{alertblock}
+    \vspace{6pt}
+    \begin{block}{Arquitectura Dynamics}
+      Transformer bloque-causal con:
+      \begin{itemize}\small
+        \item Tokens: \texttt{[ACT, SIGNAL, STEP, SPATIAL$\times 16$, REG$\times 4$]}
+        \item Atención espacio-temporal separada
+        \item $d_\text{model}{=}512$, profundidad $8$
+      \end{itemize}
+    \end{block}
+  \end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Dynamics: Entrenamiento y Bootstrapping}
+\begin{columns}[T]
+  \begin{column}{0.52\textwidth}
+    \textbf{Función de pérdida:}
+    \[
+      \mathcal{L} = \underbrace{\mathcal{L}_\text{emp}}_{\text{datos reales}} + \lambda \underbrace{\mathcal{L}_\text{self}}_{\text{bootstrap}}
+    \]
+
+    \textbf{Pérdida empírica} ($\mathcal{L}_\text{emp}$):
+    \begin{itemize}\small
+      \item MSE entre velocidad predicha y verdadera
+      \item Ponderada por $\sigma$ (mayor peso a pasos finos)
+    \end{itemize}
+
+    \vspace{4pt}
+    \textbf{Pérdida de bootstrap} ($\mathcal{L}_\text{self}$):
+    \begin{itemize}\small
+      \item Activa después de calentar el modelo (paso $>$ bootstrap\_start)
+      \item Usa las propias predicciones del modelo como objetivos
+      \item Permite aprender transiciones no vistas en los datos
+    \end{itemize}
+  \end{column}
+  \begin{column}{0.46\textwidth}
+    \begin{exampleblock}{¿Para qué sirve el bootstrap?}
+      \textbf{Sin bootstrap:} el modelo solo aprende transiciones observadas en los datos reales.
+
+      \vspace{4pt}
+      \textbf{Con bootstrap:} el modelo puede razonar sobre estados intermedios no observados, mejorando la calidad de los rollouts imaginados en el agente.
+    \end{exampleblock}
+
+    \vspace{8pt}
+    \begin{block}{Tokens de registro (registers)}
+      4 tokens aprendidos sin posición fija — actúan como ``scratch space'' para el transformer, mejorando representaciones globales.
+    \end{block}
+  \end{column}
+\end{columns}
+\end{frame}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Finetune y Agent (Fases 2 y 3)}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{frame}{Finetune: Comportamiento desde Datos Reales (Fase 2)}
+\begin{columns}[T]
+  \begin{column}{0.52\textwidth}
+    \textbf{Objetivo:} adaptar el modelo de dinámica para predecir tanto el siguiente estado como la \emph{recompensa} y el \emph{valor esperado}.
+
+    \vspace{8pt}
+    \textbf{Pérdida combinada:}
+    \[
+      \mathcal{L}_\text{ft} = \underbrace{\mathcal{L}_\text{BC}}_{\text{imitar acciones}} + \lambda_r\underbrace{\mathcal{L}_\text{reward}}_{\text{predecir recompensa}}
+    \]
+
+    \vspace{4pt}
+    \textbf{Behavioral Cloning} ($\mathcal{L}_\text{BC}$):
+    \begin{itemize}\small
+      \item Aprende a imitar la política de recolección de datos
+      \item Resuelve el \emph{bootstrap problem}: da señal inicial al agente antes de que explore
+    \end{itemize}
+
+    \vspace{4pt}
+    \textbf{Reward head:}
+    \begin{itemize}\small
+      \item Predice recompensa esperada desde el token de agente
+      \item Necesario para que el agente pueda optimizar en imaginación
+    \end{itemize}
+  \end{column}
+  \begin{column}{0.46\textwidth}
+    \begin{alertblock}{El problema del bootstrap en RL}
+      Una política aleatoria produce ventajas $\approx 0$ $\Rightarrow$ PMPO no puede mejorar.
+
+      \vspace{4pt}
+      BC ``ceba la bomba'': el agente parte sabiendo qué hacer razonablemente, y PMPO puede refinarlo.
+    \end{alertblock}
+
+    \vspace{8pt}
+    \begin{block}{Arquitectura}
+      Misma backbone que Dynamics + cabezas:
+      \begin{itemize}\small
+        \item \textbf{Policy head}: $\pi(a|z)$ — distribución de acciones
+        \item \textbf{Value head}: $V(z)$ — retorno esperado
+        \item \textbf{Reward head}: $r(z)$ — recompensa inmediata
+      \end{itemize}
+    \end{block}
+  \end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Agent: Entrenamiento por Imaginación con PMPO (Fase 3)}
+\begin{columns}[T]
+  \begin{column}{0.52\textwidth}
+    \textbf{Policy Mirror Prox Optimization (PMPO):}
+    \begin{itemize}
+      \item Variante de TRPO adaptada para espacio de acciones continuas
+      \item Actualización proximal: limita cuánto puede cambiar la política en cada paso
+      \item Estable frente a ruido en las predicciones del modelo
+    \end{itemize}
+
+    \vspace{8pt}
+    \textbf{Ciclo de imaginación:}
+    \begin{enumerate}\small
+      \item Muestrea estado inicial $z_0$ del replay buffer
+      \item Despliega horizonte $H$ pasos usando Dynamics
+      \item Calcula retornos con Value head + Reward head
+      \item Actualiza política con PMPO
+    \end{enumerate}
+  \end{column}
+  \begin{column}{0.46\textwidth}
+    \begin{exampleblock}{Ventaja de la imaginación}
+      Por cada interacción real con el entorno, el agente puede hacer \textbf{miles} de actualizaciones de política en imaginación — eficiencia de muestras extrema.
+    \end{exampleblock}
+
+    \vspace{8pt}
+    \begin{block}{Pipeline activo (ciclos)}
+      \centering
+      \small
+      Recolectar $\xrightarrow{}$ Tokenizer $\xrightarrow{}$ Dynamics $\xrightarrow{}$ Finetune $\xrightarrow{}$ Agent $\xrightarrow{}$ \textbf{Ciclo}
+      \vspace{4pt}
+
+      El agente mejora cada ciclo: datos mejores $\to$ modelo mejor $\to$ política mejor $\to$ datos mejores...
+    \end{block}
+  \end{column}
+\end{columns}
+\end{frame}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Innovaciones Técnicas Clave}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{frame}{Transformer Bloque-Causal}
+\begin{columns}[T]
+  \begin{column}{0.55\textwidth}
+    \textbf{Problema:} los transformers estándar son cuadráticamente costosos en la secuencia completa.
+
+    \vspace{8pt}
+    \textbf{Solución:} arquitectura bloque-causal con dos tipos de atención:
+
+    \vspace{6pt}
+    \begin{tabular}{p{2.2cm}p{4.2cm}}
+      \toprule
+      \textbf{Tipo} & \textbf{Descripción} \\
+      \midrule
+      Espacial & Todos los tokens dentro del mismo timestep se ven entre sí (full attention) \\
+      \addlinespace
+      Temporal & Cada token solo ve tokens del mismo tipo en timesteps anteriores (causal) \\
+      \bottomrule
+    \end{tabular}
+
+    \vspace{8pt}
+    \small Los latentes ven todos los parches espacialmente; los parches solo ven su modalidad. Esto reduce el costo vs.\ atención global completa.
+  \end{column}
+  \begin{column}{0.43\textwidth}
+    \begin{tikzpicture}[scale=0.7, font=\scriptsize]
+      % Timesteps
+      \foreach \t/\label in {0/$t{-}2$, 1/$t{-}1$, 2/$t$} {
+        \node[draw, fill=phaseA!30, minimum width=1.5cm, minimum height=0.5cm, rounded corners]
+          (lat\t) at (\t*2.1, 1.2) {Latentes};
+        \node[draw, fill=gray!20, minimum width=1.5cm, minimum height=0.5cm, rounded corners]
+          (pat\t) at (\t*2.1, 0.0) {Parches};
+        \node[above=2pt of lat\t, font=\tiny] {\label};
+      }
+      % Spatial arrows (within timestep)
+      \foreach \t in {0,1,2} {
+        \draw[{Latex}-{Latex}, phaseA, thick] (lat\t) -- (pat\t);
+      }
+      % Temporal arrows (causal, latent to latent)
+      \draw[-{Latex}, phaseB, thick] (lat0) to[bend left=25] (lat1);
+      \draw[-{Latex}, phaseB, thick] (lat1) to[bend left=25] (lat2);
+      \draw[-{Latex}, phaseB, thick] (lat0) to[bend left=40] (lat2);
+
+      \node[right=0.2cm of lat2, text=phaseA, font=\scriptsize, align=left] {Espacial\\(bidirec.)};
+      \node[right=0.2cm of pat2, text=phaseB, font=\scriptsize, align=left] {Temporal\\(causal)};
+    \end{tikzpicture}
+
+    \vspace{8pt}
+    \begin{block}{Eficiencia}
+      \small Profundidad $8$ capas, alternando atención espacial y temporal cada \texttt{time\_every}$=4$ capas.
+    \end{block}
+  \end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Resumen de Innovaciones}
+\begin{columns}[T]
+  \begin{column}{0.48\textwidth}
+    \begin{block}{\faEye\; Tokenizer MAE Temporal}
+      \begin{itemize}\small
+        \item Masking agresivo (hasta 90\%) fuerza representaciones comprimidas
+        \item Bottleneck $\tanh$ previene colapso de representaciones
+        \item Pérdida perceptual LPIPS para reconstrucciones de alta calidad
+      \end{itemize}
+    \end{block}
+    \vspace{6pt}
+    \begin{block}{\faBrain\; Flow Matching + Shortcuts}
+      \begin{itemize}\small
+        \item Velocidad en vez de ruido: más estable
+        \item Shortcut forcing: inferencia en 2--4 pasos ODE
+        \item Bootstrap self-supervised para estados no observados
+      \end{itemize}
+    \end{block}
+  \end{column}
+  \begin{column}{0.48\textwidth}
+    \begin{block}{\faGraduationCap\; Finetune BC+Reward}
+      \begin{itemize}\small
+        \item Resuelve el cold-start del agente
+        \item Aprende el modelo de recompensa necesario para PMPO
+        \item Permite continual learning con datos cíclicos
+      \end{itemize}
+    \end{block}
+    \vspace{6pt}
+    \begin{block}{\faRobot\; PMPO en Imaginación}
+      \begin{itemize}\small
+        \item Miles de actualizaciones de política por interacción real
+        \item Actualización proximal: estable frente al error del modelo
+        \item Mejora continua en pipeline activo multi-ciclo
+      \end{itemize}
+    \end{block}
+  \end{column}
+\end{columns}
+\end{frame}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Resultados Experimentales}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{frame}{Evaluación: DMControl y MMBench}
+\begin{columns}[T]
+  \begin{column}{0.52\textwidth}
+    \textbf{Entornos de evaluación:}
+    \begin{itemize}
+      \item \textbf{DMControl}: locomotion continua (cheetah-run, walker-run, hopper-hop, etc.)
+      \item \textbf{MMBench}: tareas con múltiples objetos y manipulación
+      \item Hasta \textbf{30 tareas} simultáneas en el paper oficial
+    \end{itemize}
+
+    \vspace{8pt}
+    \textbf{Baselines comparados:}
+    \begin{itemize}
+      \item \textbf{DreamerV3}: predecesor directo
+      \item \textbf{TD-MPC2}: model-based state-of-the-art
+      \item \textbf{SAC/PPO}: model-free references
+    \end{itemize}
+  \end{column}
+  \begin{column}{0.46\textwidth}
+    \begin{alertblock}{Resultados principales}
+      \begin{itemize}
+        \item DreamerV4 supera a DreamerV3 en \textbf{eficiencia de muestras}
+        \item Mejor que TD-MPC2 en tareas de largo horizonte
+        \item Escala favorablemente con más ciclos activos
+        \item Los shortcuts reducen el tiempo de inferencia en ${\sim}10\times$
+      \end{itemize}
+    \end{alertblock}
+
+    \vspace{6pt}
+    \begin{exampleblock}{Ablación de $N_z$ (tokens espaciales)}
+      \small $N_z{=}64$ da mejor balance — más tokens mejoran la predicción de dinámica pero aumentan el costo de atención cuadráticamente.
+    \end{exampleblock}
+  \end{column}
+\end{columns}
+\end{frame}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Nuestra Implementación}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{frame}{Implementación: Arquitectura Adoptada}
+\begin{columns}[T]
+  \begin{column}{0.5\textwidth}
+    \textbf{Configuración base (128×128):}
+
+    \vspace{6pt}
+    \begin{tabular}{lcc}
+      \toprule
+      \textbf{Parámetro} & \textbf{Official} & \textbf{Nuestro} \\
+      \midrule
+      patch size        & 4        & \textbf{4} \\
+      $N_L$ (latentes)  & 16       & \textbf{32} \\
+      $d_b$ (bottleneck)& 32       & \textbf{32} \\
+      $d_\text{model}$  & 256      & \textbf{256} \\
+      depth (enc/dec)   & 8        & \textbf{8} \\
+      dyn\_depth        & 8        & \textbf{8} \\
+      $N_z$ (espacial)  & 8        & \textbf{16} \\
+      Compresión        & 64:1     & \textbf{32:1} \\
+      \bottomrule
+    \end{tabular}
+  \end{column}
+  \begin{column}{0.48\textwidth}
+    \textbf{Mejoras sobre el repo oficial:}
+    \begin{itemize}
+      \item \textbf{2× más latentes} ($N_L{=}32$ vs $16$): más capacidad representacional
+      \item \textbf{Warmup + cosine LR}: convergencia más estable
+      \item \textbf{Gradient clipping}: evita explosión de gradientes en Transformer
+      \item \textbf{Pipeline activo}: el repo oficial no implementa finetune ni agente — nosotros sí
+      \item \textbf{LR optimizado}: $3{\times}10^{-4}$ tokenizer, $10^{-4}$ dynamics
+    \end{itemize}
+
+    \vspace{6pt}
+    \begin{block}{Hardware}
+      2× NVIDIA H100 80GB\\
+      \texttt{srun -{}-gpus=2 -{}-mem=128G}
+    \end{block}
+  \end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Implementación: Pipeline Activo Multi-Ciclo}
+\begin{columns}[T]
+  \begin{column}{0.52\textwidth}
+    \textbf{Tareas:} walker-run, cheetah-run, hopper-hop (DMControl)
+
+    \vspace{6pt}
+    \textbf{Por ciclo:}
+    \begin{itemize}
+      \item 24 episodios × 3 tareas × 1000 pasos = \textbf{72k frames}
+      \item Ciclo 0: política aleatoria
+      \item Ciclos 1+: política aprendida
+    \end{itemize}
+
+    \vspace{6pt}
+    \textbf{Training cold (ciclo 0):}
+    \begin{tabular}{lrr}
+      \toprule
+      Fase & Steps & Épocas \\
+      \midrule
+      Tokenizer  & 22\,500 & 10 \\
+      Dynamics   & 15\,000 & 10 \\
+      Finetune   & 15\,000 & 10 \\
+      Agent PMPO & 10\,000 & --- \\
+      \bottomrule
+    \end{tabular}
+  \end{column}
+  \begin{column}{0.46\textwidth}
+    \begin{exampleblock}{Resultados tokenizer (ciclo 0, 1 época)}
+      Tras solo 750 pasos de entrenamiento ya se observan:
+      \begin{itemize}\small
+        \item Reconstrucciones coherentes del agente
+        \item Pose corporal identificable
+        \item Fondo (cielo/suelo) correctamente reconstruido
+      \end{itemize}
+    \end{exampleblock}
+
+    \vspace{6pt}
+    \begin{block}{Scheduler LR (nuevo)}
+      \small
+      Steps 0--2000: warmup lineal $0 \to 3{\times}10^{-4}$\\
+      Steps 2000+: cosine decay hasta $\approx 0$
+    \end{block}
+  \end{column}
+\end{columns}
+\end{frame}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Conclusiones}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{frame}{Conclusiones y Trabajo Futuro}
+\begin{columns}[T]
+  \begin{column}{0.5\textwidth}
+    \textbf{DreamerV4 representa:}
+    \begin{itemize}
+      \item La aplicación de arquitecturas modernas (ViT/Transformers) al aprendizaje por refuerzo basado en modelos del mundo
+      \item Una separación limpia entre percepción, dinámica y comportamiento
+      \item Flow matching como alternativa superior a la difusión clásica para modelado de estados futuros
+      \item Un pipeline activo que mejora iterativamente con cada ciclo de datos
+    \end{itemize}
+  \end{column}
+  \begin{column}{0.48\textwidth}
+    \textbf{Trabajo futuro (nuestra implementación):}
+    \begin{itemize}
+      \item Completar los 20 ciclos activos de entrenamiento
+      \item Evaluar mejora en score DMControl por ciclo
+      \item Explorar más tareas (manipulación, navegación)
+      \item Comparar con DreamerV3 y TD-MPC2 en condiciones controladas
+    \end{itemize}
+
+    \vspace{8pt}
+    \begin{alertblock}{Estado actual}
+      Tokenizer funcionando — reconstrucciones de alta calidad a 128×128 px después de solo 1 época de entrenamiento.
+    \end{alertblock}
+  \end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}[plain]
+  \centering
+  \vspace{2cm}
+  {\Huge \textbf{¿Preguntas?}}\\[1.5cm]
+  {\large Hansen et al. (2025)}\\[0.3cm]
+  {\normalsize \texttt{arXiv:2509.24527}}\\[0.3cm]
+  {\normalsize \texttt{github.com/nicklashansen/dreamer4}}\\[1.5cm]
+  {\large Gonzalo Fuentes\\Magíster en Ciencias de la Computación}
+\end{frame}
+
+\end{document}

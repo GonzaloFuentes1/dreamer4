@@ -48,11 +48,11 @@ def _load_finetune_checkpoint(
     ckpt_path: str,
     device: torch.device,
     ac_cfg,
-) -> Tuple[Encoder, Dynamics, TaskEmbedder, PolicyHead, RewardHead, dict]:
+) -> Tuple[Encoder, Dynamics, TaskEmbedder, PolicyHead, RewardHead, dict, int]:
     """
     Load a Phase-2 (finetune) Lightning checkpoint.
 
-    Returns (encoder, dyn, task_embedder, policy_head, reward_head, tok_args).
+    Returns (encoder, dyn, task_embedder, policy_head, reward_head, tok_args, resolved_pf).
     All modules are placed on `device` and frozen.
     """
     from model import Tokenizer, Decoder
@@ -62,41 +62,66 @@ def _load_finetune_checkpoint(
     cfg_ft   = hp.get("cfg", {})
     ft_cfg   = cfg_ft.get("finetune", {}) or {}
 
-    # ---- Reconstruct tok_args from the finetune hyper-params ----
-    # Fall back to ac_cfg values if not found in checkpoint.
+    # ---- Reconstruct tok_args for the encoder ----
+    # Prefer tok_args saved directly by FinetuneLightningModule.on_save_checkpoint
+    # (contains the exact values from the tokenizer checkpoint).  Fall back to
+    # reconstructing from finetune hyper-params for checkpoints produced before
+    # on_save_checkpoint was added.
+    saved_tok_args = ckpt.get("tok_args", {})
     tok_args = {
-        "H":                  ft_cfg.get("H",                  128),
-        "W":                  ft_cfg.get("W",                  128),
-        "C":                  ft_cfg.get("C",                  3),
-        "patch":              ft_cfg.get("patch",              4),
-        "n_latents":          ft_cfg.get("n_latents",          16),
-        "d_bottleneck":       ft_cfg.get("d_bottleneck",       32),
-        "d_model":            ft_cfg.get("d_enc_model",        256),
-        "n_heads":            ft_cfg.get("n_enc_heads",        4),
-        "depth":              ft_cfg.get("enc_depth",          8),
-        "mlp_ratio":          ft_cfg.get("mlp_ratio",          4.0),
-        "time_every":         ft_cfg.get("time_every",         1),
-        "latents_only_time":  ft_cfg.get("latents_only_time",  True),
+        "H":                  saved_tok_args.get("H",                  ft_cfg.get("H",                  128)),
+        "W":                  saved_tok_args.get("W",                  ft_cfg.get("W",                  128)),
+        "C":                  saved_tok_args.get("C",                  ft_cfg.get("C",                  3)),
+        "patch":              saved_tok_args.get("patch",              ft_cfg.get("patch",              4)),
+        "n_latents":          saved_tok_args.get("n_latents",          ft_cfg.get("n_latents",          16)),
+        "d_bottleneck":       saved_tok_args.get("d_bottleneck",       ft_cfg.get("d_bottleneck",       32)),
+        "d_model":            saved_tok_args.get("d_model",            ft_cfg.get("d_enc_model",        256)),
+        "n_heads":            saved_tok_args.get("n_heads",            ft_cfg.get("n_enc_heads",        4)),
+        "depth":              saved_tok_args.get("depth",              ft_cfg.get("enc_depth",          8)),
+        "mlp_ratio":          saved_tok_args.get("mlp_ratio",          ft_cfg.get("mlp_ratio",          4.0)),
+        "time_every":         saved_tok_args.get("time_every",         ft_cfg.get("time_every",         1)),
+        "latents_only_time":  saved_tok_args.get("latents_only_time",  ft_cfg.get("latents_only_time",  True)),
+        # Discrete tokenizer fields (False/1.0 are safe defaults for continuous checkpoints)
+        "discrete":           saved_tok_args.get("discrete",           False),
+        "temperature":        saved_tok_args.get("temperature",        1.0),
     }
 
-    pf         = int(ac_cfg.packing_factor)
+    pf_cfg     = int(ft_cfg.get("packing_factor", ac_cfg.packing_factor))
+    pf         = pf_cfg
     n_latents  = tok_args["n_latents"]
-    n_spatial  = n_latents // pf
-    d_spatial  = tok_args["d_bottleneck"] * pf
+    d_bottleneck = int(tok_args["d_bottleneck"])
     n_patches  = (tok_args["H"] // tok_args["patch"]) ** 2
     d_patch    = tok_args["patch"] ** 2 * tok_args["C"]
 
     sd = ckpt.get("state_dict", {})
+    # Strip _orig_mod. prefix added by torch.compile()
+    sd = {k.replace("_orig_mod.", ""): v for k, v in sd.items()}
+
+    # Some historical checkpoints may have inconsistent cfg.packing_factor metadata.
+    # Infer from saved Dynamics weight shape when available.
+    sp_w = sd.get("dyn.spatial_proj.weight")
+    if sp_w is not None and hasattr(sp_w, "shape") and len(sp_w.shape) == 2:
+        in_features = int(sp_w.shape[1])
+        if d_bottleneck > 0 and in_features % d_bottleneck == 0:
+            pf_from_weights = in_features // d_bottleneck
+            if pf_from_weights != pf_cfg:
+                print(
+                    f"[agent_module] packing_factor mismatch (cfg={pf_cfg}, ckpt_weights={pf_from_weights}); "
+                    f"using ckpt_weights={pf_from_weights}"
+                )
+            pf = int(pf_from_weights)
+
+    n_spatial  = n_latents // pf
+    d_spatial  = d_bottleneck * pf
 
     # ---- Encoder ----
-    enc = Encoder(
+    _enc_kwargs = dict(
         patch_dim=d_patch,
         d_model=tok_args["d_model"],
         n_latents=n_latents,
         n_patches=n_patches,
         n_heads=tok_args["n_heads"],
         depth=tok_args["depth"],
-        d_bottleneck=tok_args["d_bottleneck"],
         dropout=0.0,
         mlp_ratio=tok_args["mlp_ratio"],
         time_every=tok_args["time_every"],
@@ -104,9 +129,26 @@ def _load_finetune_checkpoint(
         mae_p_min=0.0,
         mae_p_max=0.0,
     )
+    if tok_args.get("discrete", False):
+        from model import DiscreteEncoder
+        enc = DiscreteEncoder(
+            **_enc_kwargs,
+            n_categories=int(tok_args["d_bottleneck"]),
+            temperature=float(tok_args.get("temperature", 1.0)),
+        )
+    else:
+        enc = Encoder(
+            **_enc_kwargs,
+            d_bottleneck=int(tok_args["d_bottleneck"]),
+        )
     enc_sd = {k[len("_encoder."):]: v for k, v in sd.items() if k.startswith("_encoder.")}
     if enc_sd:
         enc.load_state_dict(enc_sd, strict=True)
+    else:
+        print(
+            "[agent_module] WARNING: no '_encoder.*' keys found in finetune checkpoint. "
+            "Encoder will be randomly initialised — re-run Phase 2 to generate a fixed checkpoint."
+        )
 
     # ---- Dynamics ----
     dyn = Dynamics(
@@ -144,9 +186,9 @@ def _load_finetune_checkpoint(
     state_dim  = ac_cfg.n_agent * ac_cfg.d_model_dyn
     ph = PolicyHead(
         state_dim=state_dim,
-        action_dim=int(ac_cfg.action_dim),
-        hidden_dim=int(ac_cfg.hidden_dim),
-        mtp_length=int(ac_cfg.mtp_length),
+        action_dim=int(ft_cfg.get("action_dim", ac_cfg.action_dim)),
+        hidden_dim=int(ft_cfg.get("hidden_dim", ac_cfg.hidden_dim)),
+        mtp_length=int(ft_cfg.get("mtp_length", ac_cfg.mtp_length)),
     )
     ph_sd = {k[len("policy_head."):]: v for k, v in sd.items() if k.startswith("policy_head.")}
     if ph_sd:
@@ -155,8 +197,8 @@ def _load_finetune_checkpoint(
     # ---- RewardHead ----
     rh = RewardHead(
         state_dim=state_dim,
-        hidden_dim=int(ac_cfg.hidden_dim) // 2,
-        mtp_length=int(ac_cfg.mtp_length),
+        hidden_dim=int(ft_cfg.get("hidden_dim", ac_cfg.hidden_dim)) // 2,
+        mtp_length=int(ft_cfg.get("mtp_length", ac_cfg.mtp_length)),
     )
     rh_sd = {k[len("reward_head."):]: v for k, v in sd.items() if k.startswith("reward_head.")}
     if rh_sd:
@@ -168,7 +210,7 @@ def _load_finetune_checkpoint(
         for p in m.parameters():
             p.requires_grad_(False)
 
-    return enc, dyn, te, ph, rh, tok_args
+    return enc, dyn, te, ph, rh, tok_args, pf
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,7 +250,7 @@ class AgentLightningModule(pl.LightningModule):
         ac = self.cfg.agent
 
         # ---- Load Phase-2 checkpoint (frozen) -------------------------
-        enc, dyn, task_embedder, policy_prior, reward_head, tok_args = (
+        enc, dyn, task_embedder, policy_prior, reward_head, tok_args, resolved_pf = (
             _load_finetune_checkpoint(ac.finetune_ckpt, self.device, ac)
         )
 
@@ -226,7 +268,7 @@ class AgentLightningModule(pl.LightningModule):
         self._C              = int(tok_args.get("C",            3))
         n_latents            = int(tok_args.get("n_latents",   16))
         d_bottleneck         = int(tok_args.get("d_bottleneck", 32))
-        pf                   = int(ac.packing_factor)
+        pf                   = int(resolved_pf)
 
         assert n_latents % pf == 0
         self.n_spatial      = n_latents // pf
@@ -243,6 +285,14 @@ class AgentLightningModule(pl.LightningModule):
         for p in self.policy_head.parameters():
             p.requires_grad_(True)
 
+        # Phase 3 uses only offset=0. Freeze extra MTP heads so DDP does not
+        # flag them as unused parameters when running with strategy='ddp'.
+        for n in range(1, int(self.policy_head.mtp_length)):
+            for p in self.policy_head.mu_heads[n].parameters():
+                p.requires_grad_(False)
+            for p in self.policy_head.log_std_heads[n].parameters():
+                p.requires_grad_(False)
+
         # ---- ValueHead: new ----------------------------------------
         self.value_head = ValueHead(
             state_dim=state_dim,
@@ -258,7 +308,7 @@ class AgentLightningModule(pl.LightningModule):
         """(B,T,3,H,W) uint8 → (B,T,n_spatial,d_spatial)."""
         frames    = obs_u8.float() / 255.0
         patches   = temporal_patchify(frames, self._patch)
-        z_btLd, _ = self._encoder(patches)
+        z_btLd    = self._encoder(patches)[0]   # [0] works for both Encoder and DiscreteEncoder
         return pack_bottleneck_to_spatial(z_btLd, n_spatial=self.n_spatial, k=self.packing_factor)
 
     @torch.no_grad()
@@ -493,10 +543,14 @@ class AgentLightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         ac     = self.cfg.agent
-        params = (
-            list(self.policy_head.parameters())
-            + list(self.value_head.parameters())
-        )
+        params = [
+            p
+            for p in (
+                list(self.policy_head.parameters())
+                + list(self.value_head.parameters())
+            )
+            if p.requires_grad
+        ]
         return torch.optim.AdamW(
             params,
             lr=float(ac.lr),

@@ -1,6 +1,7 @@
 # sharded_frame_dataset.py
 import os
 import bisect
+import random
 from pathlib import Path
 from typing import Sequence, List, Dict, Union, Optional
 
@@ -90,20 +91,28 @@ class ShardedFrameDataset(Dataset):
                 f"shards={len(self.shards):,}, seq_starts={self.total_starts:,}"
             )
 
-        # simple one-shard cache
-        self._cache_path: Optional[str] = None
-        self._cache_frames: Optional[torch.Tensor] = None
+        # LRU shard cache — avoids repeated torch.load() with multi-task data
+        self._cache_max = min(8, max(1, len(self.shards)))
+        self._cache: Dict[str, torch.Tensor] = {}
+        self._cache_order: List[str] = []
 
     def __len__(self) -> int:
         return self.total_starts
 
     def _load_shard(self, path: str) -> torch.Tensor:
-        if self._cache_path == path and self._cache_frames is not None:
-            return self._cache_frames
+        if path in self._cache:
+            # Move to end (most recently used)
+            self._cache_order.remove(path)
+            self._cache_order.append(path)
+            return self._cache[path]
         td = torch.load(path, map_location="cpu", weights_only=False)
         frames = td["frames"]
-        self._cache_path = path
-        self._cache_frames = frames
+        # Evict oldest if full
+        if len(self._cache) >= self._cache_max:
+            oldest = self._cache_order.pop(0)
+            del self._cache[oldest]
+        self._cache[path] = frames
+        self._cache_order.append(path)
         return frames
 
     def _map_global_start_to_shard(self, global_start: int) -> tuple[int, int]:
@@ -118,7 +127,7 @@ class ShardedFrameDataset(Dataset):
             raise IndexError("Empty dataset")
 
         if self.iid_sampling:
-            global_start = torch.randint(0, self.total_starts, (1,)).item()
+            global_start = random.randint(0, self.total_starts - 1)
         else:
             if idx < 0 or idx >= self.total_starts:
                 raise IndexError(idx)

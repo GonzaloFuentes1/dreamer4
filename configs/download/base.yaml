@@ -2,7 +2,7 @@
 # Config for download_pretrain_data.py — downloads nicklashansen/dreamer4 from HuggingFace
 # and re-renders pixel frames by replaying stored actions in DMControl.
 #
-# Produces output in identical format to collect_phase0_data.py:
+# Produces output in identical format to scripts/pipeline/train_phase0_collect_episodes.py:
 #   {out_data_dir}/{task}.pt          → {"episode", "action", "reward"}
 #   {out_frames_dir}/{task}/{task}_shard{n:04d}.pt → {"frames": (K,3,H,W) uint8}
 #

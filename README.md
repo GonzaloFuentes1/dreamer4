@@ -20,11 +20,11 @@ conda activate dreamer4
 El entrenamiento tiene 5 etapas que se ejecutan en orden. Las Fases 1a y 1b tienen checkpoints preentrenados disponibles en [HuggingFace](https://huggingface.co/nicklashansen/dreamer4) — puedes saltártelas y entrar directo en la Fase 2.
 
 ```
-Phase 0  →  collect_phase0_data.py     # recolección de episodios
-Phase 1a →  train_phase1a_tokenizer.py # tokenizador de frames
-Phase 1b →  train_phase1b_dynamics.py  # world model (dynamics)
-Phase 2  →  train_phase2_finetuning.py # BC + reward head
-Phase 3  →  train_phase3_imagination.py# RL en imaginación (PMPO)
+Phase 0  →  scripts/pipeline/train_phase0_collect_episodes.py     # recolección de episodios
+Phase 1a →  scripts/pipeline/train_phase1a_tokenizer.py # tokenizador de frames
+Phase 1b →  scripts/pipeline/train_phase1b_dynamics.py  # world model (dynamics)
+Phase 2  →  scripts/pipeline/train_phase2_finetuning.py # BC + reward head
+Phase 3  →  scripts/pipeline/train_phase3_imagination.py# RL en imaginación (PMPO)
 ```
 
 ---
@@ -35,7 +35,7 @@ Si ya tienes `tokenizer.ckpt` y `dynamics.ckpt` (de HuggingFace o entrenados tú
 
 ```bash
 # Phase 2 — Agent Finetuning
-python train_phase2_finetuning.py \
+python scripts/pipeline/train_phase2_finetuning.py \
   finetune.tokenizer_ckpt=./checkpoints/tokenizer.ckpt \
   finetune.dynamics_ckpt=./checkpoints/dynamics.ckpt \
   data.data_dirs=[./data/demos] \
@@ -43,7 +43,7 @@ python train_phase2_finetuning.py \
   trainer.devices=2
 
 # Phase 3 — Imagination Training
-python train_phase3_imagination.py \
+python scripts/pipeline/train_phase3_imagination.py \
   agent.finetune_ckpt=./logs/finetune_ckpts/last.ckpt \
   data.data_dirs=[./data/demos] \
   data.frame_dirs=[./data/frames] \
@@ -66,20 +66,20 @@ Ciclo N:  datos con agent_vN-1  →  re-entrenar  →  agent_vN.ckpt
 
 ```bash
 # 1. Recolectar episodios con política random
-python collect_phase0_data.py \
+python scripts/pipeline/train_phase0_collect_episodes.py \
   collect.out_data_dir=./data/cycle0/demos \
   collect.out_frames_dir=./data/cycle0/frames \
   collect.n_episodes_per_task=50
 
 # 2. Phase 1a — Tokenizer
 srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=48:00:00 \
-  python train_phase1a_tokenizer.py \
+  python scripts/pipeline/train_phase1a_tokenizer.py \
   data.frame_dirs=[./data/cycle0/frames] \
   trainer.devices=2
 
 # 3. Phase 1b — Dynamics
 srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=48:00:00 \
-  python train_phase1b_dynamics.py \
+  python scripts/pipeline/train_phase1b_dynamics.py \
   dynamics.tokenizer_ckpt=./logs/tokenizer_ckpts/last.ckpt \
   data.data_dirs=[./data/cycle0/demos] \
   data.frame_dirs=[./data/cycle0/frames] \
@@ -87,7 +87,7 @@ srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=48:00:00 \
 
 # 4. Phase 2 — Finetuning
 srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
-  python train_phase2_finetuning.py \
+  python scripts/pipeline/train_phase2_finetuning.py \
   finetune.tokenizer_ckpt=./logs/tokenizer_ckpts/last.ckpt \
   finetune.dynamics_ckpt=./logs/dynamics_ckpts/last.ckpt \
   data.data_dirs=[./data/cycle0/demos] \
@@ -96,7 +96,7 @@ srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
 
 # 5. Phase 3 — Imagination Training
 srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
-  python train_phase3_imagination.py \
+  python scripts/pipeline/train_phase3_imagination.py \
   agent.finetune_ckpt=./logs/finetune_ckpts/last.ckpt \
   data.data_dirs=[./data/cycle0/demos] \
   data.frame_dirs=[./data/cycle0/frames] \
@@ -108,7 +108,7 @@ srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
 
 ```bash
 # Recolectar con la política entrenada del ciclo anterior
-python collect_phase0_data.py \
+python scripts/pipeline/train_phase0_collect_episodes.py \
   collect.policy=agent \
   collect.agent_ckpt=./logs/agent_ckpts/last.ckpt \
   collect.out_data_dir=./data/cycle1/demos \
@@ -118,7 +118,7 @@ python collect_phase0_data.py \
 # Re-entrenar Phase 2 y 3 acumulando TODOS los ciclos de datos
 # (WMDataModule acepta listas de directorios — une todos los datos)
 srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
-  python train_phase2_finetuning.py \
+  python scripts/pipeline/train_phase2_finetuning.py \
   finetune.tokenizer_ckpt=./logs/tokenizer_ckpts/last.ckpt \
   finetune.dynamics_ckpt=./logs/dynamics_ckpts/last.ckpt \
   "data.data_dirs=[./data/cycle0/demos,./data/cycle1/demos]" \
@@ -126,7 +126,7 @@ srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
   trainer.devices=2
 
 srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
-  python train_phase3_imagination.py \
+  python scripts/pipeline/train_phase3_imagination.py \
   agent.finetune_ckpt=./logs/finetune_ckpts/last.ckpt \
   "data.data_dirs=[./data/cycle0/demos,./data/cycle1/demos]" \
   "data.frame_dirs=[./data/cycle0/frames,./data/cycle1/frames]" \
@@ -165,11 +165,11 @@ for CYCLE in $(seq 0 $((K - 1))); do
 
   # Phase 0 — Colección
   if [ "$CYCLE" -eq 0 ]; then
-    python collect_phase0_data.py \
+    python scripts/pipeline/train_phase0_collect_episodes.py \
       collect.out_data_dir=$OUT_DATA \
       collect.out_frames_dir=$OUT_FRAMES
   else
-    python collect_phase0_data.py \
+    python scripts/pipeline/train_phase0_collect_episodes.py \
       collect.policy=agent \
       collect.agent_ckpt=./logs/agent_ckpts/last.ckpt \
       collect.out_data_dir=$OUT_DATA \
@@ -186,11 +186,11 @@ for CYCLE in $(seq 0 $((K - 1))); do
   # Phase 1a+1b solo en ciclo 0
   if [ "$CYCLE" -eq 0 ]; then
     $SRUN --time=$TIME_LONG \
-      python train_phase1a_tokenizer.py \
+      python scripts/pipeline/train_phase1a_tokenizer.py \
       "data.frame_dirs=[$FRAME_DIRS]" trainer.devices=$DEVICES
 
     $SRUN --time=$TIME_LONG \
-      python train_phase1b_dynamics.py \
+      python scripts/pipeline/train_phase1b_dynamics.py \
       dynamics.tokenizer_ckpt=$TOK_CKPT \
       "data.data_dirs=[$DATA_DIRS]" \
       "data.frame_dirs=[$FRAME_DIRS]" \
@@ -199,7 +199,7 @@ for CYCLE in $(seq 0 $((K - 1))); do
 
   # Phase 2
   $SRUN --time=$TIME_SHORT \
-    python train_phase2_finetuning.py \
+    python scripts/pipeline/train_phase2_finetuning.py \
     finetune.tokenizer_ckpt=$TOK_CKPT \
     finetune.dynamics_ckpt=$DYN_CKPT \
     "data.data_dirs=[$DATA_DIRS]" \
@@ -208,7 +208,7 @@ for CYCLE in $(seq 0 $((K - 1))); do
 
   # Phase 3
   $SRUN --time=$TIME_SHORT \
-    python train_phase3_imagination.py \
+    python scripts/pipeline/train_phase3_imagination.py \
     agent.finetune_ckpt=./logs/finetune_ckpts/last.ckpt \
     "data.data_dirs=[$DATA_DIRS]" \
     "data.frame_dirs=[$FRAME_DIRS]" \
@@ -226,11 +226,11 @@ done
 
 ```
 dreamer4/
-├── collect_phase0_data.py        # Phase 0 — recolección
-├── train_phase1a_tokenizer.py    # Phase 1a — tokenizer
-├── train_phase1b_dynamics.py     # Phase 1b — world model
-├── train_phase2_finetuning.py    # Phase 2 — BC + reward
-├── train_phase3_imagination.py   # Phase 3 — RL en imaginación
+├── scripts/pipeline/train_phase0_collect_episodes.py        # Phase 0 — recolección
+├── scripts/pipeline/train_phase1a_tokenizer.py    # Phase 1a — tokenizer
+├── scripts/pipeline/train_phase1b_dynamics.py     # Phase 1b — world model
+├── scripts/pipeline/train_phase2_finetuning.py    # Phase 2 — BC + reward
+├── scripts/pipeline/train_phase3_imagination.py   # Phase 3 — RL en imaginación
 │
 ├── configs/
 │   ├── collect/base.yaml         # config Phase 0

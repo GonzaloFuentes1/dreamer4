@@ -153,18 +153,24 @@ class PolicyHead(nn.Module):
         L       = self.mtp_length
         T_valid = max(1, T - L)
 
+        feat  = self.trunk(h_flat_bt[:, :T_valid].flatten(0, 1))      # (B*T_v, hidden) — computed once
+
         total = torch.tensor(0.0, device=h_flat_bt.device)
         for n in range(L):
             end = T_valid + n
             if end > T:
                 break
-            h_n  = h_flat_bt[:, :T_valid].flatten(0, 1)              # (B*T_v, D)
             a_n  = actions_bt[:, n:n + T_valid].flatten(0, 1)        # (B*T_v, A)
             mask = None if act_mask_bt is None else act_mask_bt[:, n:n + T_valid].flatten(0, 1)
 
-            a_raw = torch.atanh(a_n.clamp(-0.999, 0.999))
-            lp    = self.log_prob(h_n, a_raw, mask, offset=n)
-            total = total - lp.mean()
+            a_raw   = torch.atanh(a_n.clamp(-0.999, 0.999))
+            mu      = self.mu_heads[n](feat)
+            log_std = self.log_std_heads[n](feat).clamp(-5.0, 2.0)
+            std     = log_std.exp()
+            lp      = torch.distributions.Normal(mu, std).log_prob(a_raw)
+            if mask is not None:
+                lp = lp * mask
+            total = total - lp.sum(-1).mean()
         return total / L
 
 
@@ -211,14 +217,16 @@ class RewardHead(nn.Module):
         L       = self.mtp_length
         T_valid = max(1, T - L)
 
+        feat  = self.trunk(h_flat_bt[:, :T_valid].flatten(0, 1))    # (B*T_v, hidden) — computed once
+        bins  = self.bins.to(h_flat_bt.device)
+
         total = torch.tensor(0.0, device=h_flat_bt.device)
         for n in range(L):
             if n + T_valid > T:
                 break
-            h_n  = h_flat_bt[:, :T_valid].flatten(0, 1)            # (B*T_v, D)
-            r_n  = rewards_bt[:, n:n + T_valid].flatten()          # (B*T_v,)
-            logits = self.forward(h_n, offset=n)
-            total  = total + twohot_loss(logits, r_n, self.bins.to(logits.device)).mean()
+            r_n    = rewards_bt[:, n:n + T_valid].flatten()        # (B*T_v,)
+            logits = self.heads[n](feat)
+            total  = total + twohot_loss(logits, r_n, bins).mean()
         return total / L
 
 

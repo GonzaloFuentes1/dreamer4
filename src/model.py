@@ -89,12 +89,15 @@ def sinusoid_table(n: int, d: int, base: float = 10000.0, device=None) -> torch.
     return torch.where((i % 2) == 0, torch.sin(ang), torch.cos(ang))  # (n,d) fp32
 
 
-def add_sinusoidal_positions(tokens_btSd: torch.Tensor) -> torch.Tensor:
+def add_sinusoidal_positions(tokens_btSd: torch.Tensor, scale_pos_embeds: bool = True) -> torch.Tensor:
     B, T, S, D = tokens_btSd.shape
     device = tokens_btSd.device
     pos_t = sinusoid_table(T, D, device=device)  # fp32
     pos_s = sinusoid_table(S, D, device=device)  # fp32
-    pos = (pos_t[None, :, None, :] + pos_s[None, None, :, :]) * (1.0 / math.sqrt(D))
+    if scale_pos_embeds:
+        pos = (pos_t[None, :, None, :] + pos_s[None, None, :, :]) * (1.0 / math.sqrt(D))
+    else:
+        pos = (pos_t[None, :, None, :] + pos_s[None, None, :, :])
     return tokens_btSd + pos.to(dtype=tokens_btSd.dtype)
 
 
@@ -309,13 +312,12 @@ class BlockCausalLayer(nn.Module):
 
         self.norm3 = RMSNorm(d_model)
         self.mlp = MLP(d_model, mlp_ratio=mlp_ratio, dropout=dropout)
-        self.drop3 = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.drop1(self.space(self.norm1(x)))
         if self.do_time:
             x = x + self.drop2(self.time(self.norm2(x)))
-        x = x + self.drop3(self.mlp(self.norm3(x)))
+        x = x + self.mlp(self.norm3(x))
         return x
 
 
@@ -368,11 +370,13 @@ class Encoder(nn.Module):
         latents_only_time: bool = True,
         mae_p_min: float = 0.0,
         mae_p_max: float = 0.9,
+        scale_pos_embeds: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
         self.n_latents = n_latents
         self.n_patches = n_patches
+        self.scale_pos_embeds = scale_pos_embeds
 
         self.patch_proj = nn.Linear(patch_dim, d_model)
         self.bottleneck_proj = nn.Linear(d_model, d_bottleneck)
@@ -401,7 +405,7 @@ class Encoder(nn.Module):
 
         lat = self.latents.view(1, 1, self.n_latents, -1).expand(B, T, -1, -1)
         tokens = torch.cat([lat, proj_masked], dim=2)        # (B,T,S,D)
-        tokens = add_sinusoidal_positions(tokens)
+        tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
 
         enc = self.transformer(tokens)
         z = torch.tanh(self.bottleneck_proj(enc[:, :, :self.n_latents, :]))
@@ -423,10 +427,12 @@ class Decoder(nn.Module):
         mlp_ratio: float = 4.0,
         time_every: int = 4,
         latents_only_time: bool = True,
+        scale_pos_embeds: bool = True,
     ):
         super().__init__()
         self.n_latents = n_latents
         self.n_patches = n_patches
+        self.scale_pos_embeds = scale_pos_embeds
 
         self.up_proj = nn.Linear(d_bottleneck, d_model)
         self.patch_queries = nn.Parameter(torch.empty(n_patches, d_model))
@@ -449,10 +455,10 @@ class Decoder(nn.Module):
         B, T, L, _ = z_btLd.shape
         assert L == self.n_latents
 
-        lat = torch.tanh(self.up_proj(z_btLd))                                 # (B,T,L,D)
+        lat = torch.tanh(self.up_proj(z_btLd))                                   # (B,T,L,D)
         qry = self.patch_queries.view(1, 1, self.n_patches, -1).expand(B, T, -1, -1)
         tokens = torch.cat([lat, qry], dim=2)                                  # (B,T,S,D)
-        tokens = add_sinusoidal_positions(tokens)
+        tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
 
         x = self.transformer(tokens)
         x_p = x[:, :, L:, :]
@@ -469,6 +475,121 @@ class Tokenizer(nn.Module):
         z, (mae_mask, keep_prob) = self.encoder(patches_btnd)
         pred = self.decoder(z)
         return pred, mae_mask, keep_prob
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Discrete (DreamerV3-style) tokenizer
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DiscreteEncoder(nn.Module):
+    """
+    DreamerV3-style encoder that maps frames to *discrete* latent codes.
+
+    Produces ``n_latents`` categorical variables, each with ``n_categories``
+    classes.  Uses a straight-through gradient estimator during training so
+    gradients flow through the hard one-hot samples; pure argmax at eval time.
+
+    Output shape: ``(B, T, n_latents, n_categories)`` — one-hot float vectors.
+    This is structurally identical to :class:`Encoder`'s ``(B,T,L,d_bottleneck)``
+    output, so it is fully compatible with ``pack_bottleneck_to_spatial`` and
+    the existing :class:`Decoder`.
+
+    The projection layer is named ``bottleneck_proj`` (matching :class:`Encoder`)
+    so that tokenizer checkpoint state-dicts can be loaded into this class
+    without key remapping.
+
+    ``d_bottleneck`` is stored as an attribute alias for ``n_categories`` so that
+    downstream code (dynamics, agent) that reads ``d_bottleneck`` from a loaded
+    encoder still works correctly.
+    """
+
+    def __init__(
+        self,
+        *,
+        patch_dim: int,
+        d_model: int,
+        n_latents: int,
+        n_patches: int,
+        n_heads: int,
+        depth: int,
+        n_categories: int,
+        dropout: float = 0.0,
+        mlp_ratio: float = 4.0,
+        time_every: int = 4,
+        latents_only_time: bool = True,
+        mae_p_min: float = 0.0,
+        mae_p_max: float = 0.9,
+        temperature: float = 1.0,
+        scale_pos_embeds: bool = True,
+    ):
+        super().__init__()
+        self.d_model      = d_model
+        self.n_latents    = n_latents
+        self.n_patches    = n_patches
+        self.d_bottleneck = n_categories   # alias so downstream readers work
+        self.temperature  = temperature
+        self.scale_pos_embeds = scale_pos_embeds
+
+        self.patch_proj     = nn.Linear(patch_dim, d_model)
+        # Named bottleneck_proj (same as Encoder) for state-dict compatibility
+        self.bottleneck_proj = nn.Linear(d_model, n_categories)
+
+        self.layout      = TokenLayout(n_latents=n_latents, segments=((Modality.IMAGE, n_patches),))
+        modality_ids     = self.layout.modality_ids()
+
+        self.transformer = BlockCausalTransformer(
+            d_model=d_model, n_heads=n_heads, depth=depth,
+            n_latents=n_latents, modality_ids=modality_ids,
+            space_mode="encoder",
+            dropout=dropout, mlp_ratio=mlp_ratio,
+            time_every=time_every, latents_only_time=latents_only_time,
+        )
+        self.mae = MAEReplacer(d_model=d_model, p_min=mae_p_min, p_max=mae_p_max)
+
+        self.latents = nn.Parameter(torch.empty(n_latents, d_model))
+        nn.init.normal_(self.latents, std=0.02)
+
+    def forward(self, patch_tokens_btnd: torch.Tensor):
+        B, T, Np, Dp = patch_tokens_btnd.shape
+        assert Np == self.n_patches
+
+        proj = self.patch_proj(patch_tokens_btnd)
+        proj_masked, mae_mask, keep_prob = self.mae(proj)
+
+        lat    = self.latents.view(1, 1, self.n_latents, -1).expand(B, T, -1, -1)
+        tokens = torch.cat([lat, proj_masked], dim=2)
+        tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
+
+        enc    = self.transformer(tokens)
+        logits = self.bottleneck_proj(enc[:, :, :self.n_latents, :])   # (B,T,L,C)
+
+        n_cat = logits.shape[-1]
+        if self.training:
+            # Straight-through categorical: hard one-hot forward, soft probs backward
+            probs   = F.softmax(logits / self.temperature, dim=-1)          # (B,T,L,C)
+            hard    = F.one_hot(logits.argmax(-1), n_cat).to(probs.dtype)   # (B,T,L,C)
+            z       = hard - probs.detach() + probs
+            entropy = -(probs * (probs + 1e-8).log()).sum(-1)               # (B,T,L)
+        else:
+            # Eval / frozen: pure argmax, no entropy needed
+            z       = F.one_hot(logits.argmax(-1), n_cat).to(logits.dtype)
+            entropy = logits.new_zeros(logits.shape[:-1])
+
+        return z, (mae_mask, keep_prob), entropy
+
+
+class DiscreteTokenizer(nn.Module):
+    """Wraps :class:`DiscreteEncoder` + :class:`Decoder` for Phase-1a training."""
+
+    def __init__(self, encoder: DiscreteEncoder, decoder: "Decoder"):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, patches_btnd: torch.Tensor):
+        z, (mae_mask, keep_prob), entropy = self.encoder(patches_btnd)
+        pred = self.decoder(z)
+        return pred, mae_mask, keep_prob, entropy
 
 
 def pack_bottleneck_to_spatial(z_btLd: torch.Tensor, *, n_spatial: int, k: int) -> torch.Tensor:
@@ -584,6 +705,8 @@ class Dynamics(nn.Module):
         mlp_ratio: float = 4.0,
         time_every: int = 4,
         space_mode: str = "wm_agent_isolated",  # or "wm_agent"
+        scale_pos_embeds: bool = True,
+        action_dim: int = 16,
     ):
         super().__init__()
         assert d_spatial % d_bottleneck == 0, "expected packing: d_spatial = d_bottleneck * packing_factor"
@@ -593,12 +716,13 @@ class Dynamics(nn.Module):
         self.n_register = int(n_register)
         self.n_agent = int(n_agent)
         self.k_max = int(k_max)
+        self.scale_pos_embeds = scale_pos_embeds
 
         self.spatial_proj = nn.Linear(self.d_spatial, self.d_model)
         self.register_tokens = nn.Parameter(torch.empty(self.n_register, self.d_model))
         nn.init.normal_(self.register_tokens, std=0.02)
 
-        self.action_encoder = ActionEncoder(d_model=self.d_model, action_dim=16)
+        self.action_encoder = ActionEncoder(d_model=self.d_model, action_dim=int(action_dim))
 
         # shortcut conditioning
         self.num_step_bins = int(math.log2(self.k_max)) + 1
@@ -672,7 +796,7 @@ class Dynamics(nn.Module):
             toks = [action_tokens, sig_tok, step_tok, spatial_tokens, reg]
 
         tokens = torch.cat(toks, dim=2)  # (B,T,S,D)
-        tokens = add_sinusoidal_positions(tokens)
+        tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
         x = self.transformer(tokens)
 
         spatial_out = x[:, :, self.spatial_slice, :]
@@ -683,6 +807,19 @@ class Dynamics(nn.Module):
             h_t = x[:, :, self.agent_slice, :]   # (B,T,n_agent,d_model)
 
         return x1_hat, h_t
+
+
+class RunningRMSNorm:
+    """Scale a loss term by its running RMS (Dreamer3-style loss normalization)."""
+
+    def __init__(self, decay: float = 0.999):
+        self.decay = decay
+        self.rms = 1.0
+
+    def __call__(self, loss: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.rms = self.decay * self.rms + (1 - self.decay) * loss.detach().square().mean().sqrt().item()
+        return loss / max(self.rms, 1e-8)
 
 
 def recon_loss_from_mae(pred_btnd: torch.Tensor,

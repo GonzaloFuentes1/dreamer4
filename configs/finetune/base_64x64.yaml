@@ -1,0 +1,46 @@
+# configs/finetune/base_64x64.yaml
+# Phase 2 — finetuning (BC + reward) for base_64x64 dynamics.
+# Architecture must match dynamics/base_64x64 exactly.
+
+tokenizer_ckpt: ???
+dynamics_ckpt: ???
+packing_factor: 2
+
+# Architecture (must match dynamics/base_64x64)
+d_model_dyn: 512
+dyn_depth: 8
+n_heads: 4
+dropout: 0.1
+mlp_ratio: 4.0
+time_every: 4
+n_register: 4
+n_agent: 1
+space_mode: wm_agent_isolated
+k_max: 8
+
+# Shortcut / bootstrap (same as Phase 1)
+bootstrap_start: 3000
+self_fraction: 0.25
+use_actions: true
+
+use_task_ids: false
+n_tasks: 128
+mtp_length: 8
+
+# Finetuning network
+hidden_dim: 512
+action_dim: 16
+
+bc_coef: 1.0
+reward_coef: 2.0
+
+lr: 3.0e-4
+weight_decay: 1.0e-2
+grad_clip: 10.0
+eval_every: 10000
+eval_batch_size: 4
+eval_max_items: 4
+eval_ctx: 8
+eval_horizon: 16
+eval_schedule: shortcut
+eval_d: 0.25
