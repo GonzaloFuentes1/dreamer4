@@ -1,0 +1,90 @@
+# configs/run.yaml
+# Configuración general del coordinator de entrenamiento (scripts/run.py).
+# Controla el ciclo completo: qué modelos usar, cuántos steps, rutas, tasks, etc.
+# Los hiperparámetros específicos de cada modelo siguen en sus propios yamls
+# (configs/tokenizer/, configs/dynamics/, configs/finetune/, configs/agent/).
+#
+# Uso básico:
+#   python scripts/run.py
+#   python scripts/run.py run.tag=mi_experimento run.cycles=5
+#   python scripts/run.py model.tokenizer=discrete_base_64x64 run.res=64
+#
+# Retomar un run existente:
+#   python scripts/run.py run.tag=mi_experimento  # detecta checkpoints automáticamente
+
+# ── Identificación del run ────────────────────────────────────────────────────
+run:
+  tag: "default"          # nombre del run → runs/<tag>/
+  cycles: 10              # número de ciclos de self-play
+  res: 64                 # resolución de imagen: 64 | 128
+  seed: 0
+
+# ── Selección de modelos ──────────────────────────────────────────────────────
+# Apunta a los nombres de config dentro de configs/tokenizer/, dynamics/, etc.
+model:
+  tokenizer: "base_64x64"         # e.g. base_64x64 | discrete_base_64x64 | large_64x64
+  dynamics: "base_64x64"          # e.g. base_64x64 | large_64x64
+  finetune: "base_64x64"
+  agent: "base_64x64"
+
+# ── Datos ─────────────────────────────────────────────────────────────────────
+data:
+  base_root: "./data/pretrained-64x64"
+  tasks:
+    - walker-walk
+    - walker-run
+    - cheetah-run
+    - walker-stand
+    - hopper-hop
+  num_workers: 4
+
+# ── Steps de entrenamiento ────────────────────────────────────────────────────
+# cold = steps totales en ciclo 0 (entrenamiento frío)
+# warm = steps adicionales por ciclo de self-play (ciclos 1+)
+steps:
+  tokenizer_cold: 90000
+  tokenizer_warm: 3000
+  dynamics_cold: 90000
+  dynamics_warm: 3000
+  finetune_cold: 25000
+  finetune_warm: 10000
+  agent_cold: 30000
+  agent_warm: 10000
+
+# ── Batch sizes ───────────────────────────────────────────────────────────────
+batch:
+  tokenizer: 28
+  dynamics: 64
+  finetune: 64
+  agent: 64
+
+# ── Checkpointing ─────────────────────────────────────────────────────────────
+checkpoint:
+  every_tokenizer: 5000
+  every_dynamics: 10000
+  every_finetune: 5000
+  every_agent: 5000
+  save_top_k: -1          # -1 = guardar todos los snapshots
+
+# ── Trainer ───────────────────────────────────────────────────────────────────
+trainer:
+  precision: "bf16-mixed"
+  devices: null           # null = autodetectar GPUs disponibles
+  strategy: "ddp"
+  num_nodes: 1
+  log_every_n_steps: 5
+  accumulate_grad_batches: 1
+
+# ── Colección de episodios (ciclos 1+) ────────────────────────────────────────
+collect:
+  n_episodes_per_task: 30
+  episode_len: 500        # steps de agente (frame_skip=2 → 1000 physics steps)
+  frame_skip: 2
+  num_envs: 10
+  save_video: true
+  video_fps: 30
+
+# ── W&B ───────────────────────────────────────────────────────────────────────
+wandb:
+  project: "dreamer4"
+  entity: null
