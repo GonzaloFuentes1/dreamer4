@@ -6,6 +6,13 @@ wandb/
 logs/
 logs_pretrain/
 outputs/
+runs/
+
+# Debug / generated frames in docs
+docs/debug_frames/
+
+# PDF papers (large binary, tracked as text via docs/paper.md)
+*.pdf
 
 # Training data (large binary files)
 data/
