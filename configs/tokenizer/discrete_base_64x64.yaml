@@ -1,0 +1,56 @@
+# configs/tokenizer/discrete_base_64x64.yaml
+# Discrete tokenizer base para 64×64 — ~21M parámetros.
+#
+# Representación: n_latents=32 variables categóricas × n_categories=32 clases.
+# = 32 × log₂(32) = 160 bits efectivos por frame — idéntico a DreamerV3.
+# Tras packing (factor=2): n_spatial=16, d_spatial=32×2=64
+#   → el dynamics recibe 16 tokens espaciales (vs 8 del continuo).
+#   → compatible con dynamics/base_64x64.yaml (packing_factor=2).
+#
+# Escala vs large: base usa d_model=256/depth=8 (≈21M); large usa 320/10 (≈41M).
+# Máxima diferencia respecto al continuo: encoder usa softmax categórico
+# con straight-through; decoder idéntico.
+
+# ── Modo discreto ────────────────────────────────────────────────────────────
+discrete: true
+temperature: 1.0         # temperatura del softmax categórico (entrenamiento)
+entropy_scale: 0.01      # penalización de colapso de categorías
+
+# ── Image / patching ─────────────────────────────────────────────────────────
+H: 64
+W: 64
+C: 3
+patch: 4
+
+# ── Architecture ─────────────────────────────────────────────────────────────
+# d_bottleneck == n_categories para el modo discreto
+d_model: 256
+n_heads: 4
+depth: 8
+n_latents: 32
+d_bottleneck: 32          # = n_categories
+dropout: 0.05
+mlp_ratio: 4.0
+time_every: 1
+latents_only_time: true
+scale_pos_embeds: false
+mae_p_min: 0.0
+mae_p_max: 0.9
+
+# ── Optimizer ────────────────────────────────────────────────────────────────
+lr: 1.0e-4
+weight_decay: 1.0e-2
+warmup_steps: 2000
+lr_schedule: constant_with_warmup
+grad_clip: 1.0
+
+# ── Loss ─────────────────────────────────────────────────────────────────────
+lpips_weight: 0.2
+lpips_frac: 0.5
+lpips_net: alex
+use_loss_norm: false
+
+# ── Viz ──────────────────────────────────────────────────────────────────────
+viz_every: 500
+viz_max_items: 4
+viz_max_T: 8

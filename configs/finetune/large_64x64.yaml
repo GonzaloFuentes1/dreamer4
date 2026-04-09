@@ -1,0 +1,48 @@
+# configs/finetune/large_64x64.yaml
+# Phase 2 — finetuning para large_64x64. Arquitectura debe coincidir con dynamics/large_64x64.
+
+tokenizer_ckpt: ???
+dynamics_ckpt: ???
+packing_factor: 2
+
+# Architecture (must match dynamics/large_64x64)
+d_model_dyn: 896
+dyn_depth: 12
+n_heads: 8
+dropout: 0.1
+mlp_ratio: 4.0
+time_every: 4
+n_register: 8
+n_agent: 1
+space_mode: wm_agent_isolated
+k_max: 8
+
+# Shortcut / bootstrap
+bootstrap_start: 3000
+self_fraction: 0.25
+use_actions: true
+
+# Task conditioning
+use_task_ids: false
+n_tasks: 128
+mtp_length: 8
+
+# Head architecture (más grande acorde al modelo)
+hidden_dim: 896
+action_dim: 16
+
+# Optimizer
+lr: 1.0e-4
+weight_decay: 1.0e-2
+warmup_steps: 1000
+lr_schedule: constant_with_warmup
+grad_clip: 1.0
+
+# Evaluation
+eval_every: 10000
+eval_batch_size: 4
+eval_max_items: 4
+eval_ctx: 8
+eval_horizon: 16
+eval_schedule: shortcut
+eval_d: 0.25
