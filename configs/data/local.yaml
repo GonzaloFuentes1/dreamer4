@@ -1,37 +1,22 @@
 # configs/data/local.yaml
-# Data paths for local development. Override with your actual paths.
+# Paths de datos para desarrollo local.
+# Sobreescribe con tus rutas reales.
 #
 # Opciones (elige una):
-#   data_root: /ruta/al/dir          → auto-descubre ciclos con .h5 adentro
-#   data_dirs: [dir1, dir2, ...]     → lista explícita de dirs con archivos .h5
-#
-# Los archivos .h5 se generan con:
-#   python scripts/pipeline/train_phase0_collect_episodes.py  (colección)
-#   python scripts/convert_pt_to_hdf5.py --data <dir>         (conversión legacy)
+#   data_root: /ruta/dir   → descubre automáticamente todos los .h5 del dir
+#   data_dirs: [dir1, ...]  → lista explícita de dirs con archivos .h5
 
 data_root: null
-
 data_dirs:
   - /workspace1/gofuentes/dreamer4/data/pretrained-64x64
 
-tasks_json: ${hydra:runtime.cwd}/tasks.json
-
-# Filtro de tasks (null = todas las encontradas en data_dirs)
-tasks: null
-
-seq_len_tokenizer: 8
-batch_size_tokenizer: 8
-
-seq_len_dynamics: 32
-batch_size_dynamics: 24
+tasks: null             # null = todas las encontradas en data_dirs
 
 img_size: 64
-
-# Frame skip usado durante la colección
-frame_skip: 2
-
-# Workers de DataLoader
+seq_len_tokenizer: 8
+batch_size_tokenizer: 8
+seq_len_dynamics: 32
+batch_size_dynamics: 24
 num_workers: 8
-
-# Visual domain randomization en colección (randomiza colores de MuJoCo en reset)
+frame_skip: 2
 color_randomization: false

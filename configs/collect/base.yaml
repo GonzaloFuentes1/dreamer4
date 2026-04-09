@@ -1,17 +1,26 @@
 # configs/collect/base.yaml
-tasks: [dmc_cheetah_run, atari_pong]
+# Config base para Phase 0 — recolección de episodios.
+# Los scripts/pipeline/train_phase0_collect_episodes.py y launch_phase0_dist.py
+# usan esta config via Hydra.
+
+tasks: [walker-walk, cheetah-run, hopper-hop]
 num_envs_per_task: 4
 n_episodes_per_task: 100
 
-policy: random  # random | agent
+policy: random        # random | agent
 agent_ckpt: null
 
-out_data_dir: ./data/collected/demos
-out_frames_dir: ./data/collected/frames
-shard_size: 2048
-img_size: 128
-frame_skip: 1  # 1 = sin frame skip (pretrain). Usa 2 para finetuning/agente.
+out_data_dir: ./data/collected      # directorio de salida (archivos .h5)
+out_videos_dir: ./data/collected/videos
+
+img_size: 64
+frame_skip: 2
+episode_len: 500
+action_dim: 16
+
 save_preview_video: false
 preview_video_max_frames: 300
-preview_video_fps: 20
-out_videos_dir: ./data/collected/videos
+preview_video_fps: 30
+preview_video_backend: torchrl
+
+color_randomization: false
