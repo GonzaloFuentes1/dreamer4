@@ -366,14 +366,15 @@ def phase_eval(cfg: DictConfig, run_root: Path, agent_ckpt: Path) -> None:
 def main() -> None:
     cfg = OmegaConf.load(REPO_ROOT / "configs" / "run.yaml")
 
-    # Aplicar overrides CLI estilo key=value
+    # Aplicar overrides CLI estilo key=value (soporta listas: key=[a,b,c])
     for arg in sys.argv[1:]:
         if "=" in arg:
             key, val = arg.split("=", 1)
-            # Intentar parsear como tipo nativo; si falla, dejar como string
             try:
-                parsed = OmegaConf.create({key.split(".")[-1]: val})
-                OmegaConf.update(cfg, key, list(parsed.values())[0], merge=True)
+                # from_dotlist parsea correctamente listas YAML y tipos nativos
+                tmp = OmegaConf.from_dotlist([f"{key}={val}"])
+                parsed_val = OmegaConf.select(tmp, key)
+                OmegaConf.update(cfg, key, parsed_val, merge=True)
             except Exception:
                 OmegaConf.update(cfg, key, val, merge=True)
         else:
