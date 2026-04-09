@@ -37,3 +37,6 @@ frame_skip: 2
 
 # Shared
 num_workers: 8
+
+# Visual domain randomization (randomiza colores de geoms en cada reset)
+color_randomization: false

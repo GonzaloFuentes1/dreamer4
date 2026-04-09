@@ -150,6 +150,7 @@ def main(cfg: DictConfig):
     episodes_target = dc.get("n_episodes_per_task", 100)
     episode_len = int(dc.get("episode_len", 1000))
     frame_skip = int(dc.get("frame_skip", 1))
+    color_randomization = bool(dc.get("color_randomization", False))
     shard_size = dc.get("shard_size", 2048)
     target_img_size = dc.get("img_size", 128)
     target_action_dim = int(dc.get("action_dim", 16))
@@ -175,7 +176,7 @@ def main(cfg: DictConfig):
         
         # 1. Pipeline de Simulación
         print("[1/4] Levantando entorno EnvPool + TorchRL Wrappers...")
-        env = make_torchrl_env(task, num_envs=num_envs, seed=cfg.get("seed", 42), img_size=target_img_size, frame_skip=frame_skip)
+        env = make_torchrl_env(task, num_envs=num_envs, seed=cfg.get("seed", 42), img_size=target_img_size, frame_skip=frame_skip, color_randomization=color_randomization)
         
         # 2. Pipeline de la Política
         print("[2/4] Instanciando Política...")

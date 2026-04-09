@@ -49,7 +49,7 @@ def parse_atari_task(task: str):
     name = "".join([p.capitalize() for p in parts])
     return f"{name}NoFrameskip-v4"
 
-def _make_single_env(task: str, img_size: int = 64, frame_skip: int = 1):
+def _make_single_env(task: str, img_size: int = 64, frame_skip: int = 1, color_randomization: bool = False, seed: int = 42):
     """
     Contexto constructor anónimo para cada hilo de Multiprocessing local
     (Propuesta 1)
@@ -91,20 +91,43 @@ def _make_single_env(task: str, img_size: int = 64, frame_skip: int = 1):
             pixels_only=False
         )
 
-    return TransformedEnv(
-        env,
-        Compose(
-            ToTensorImage(in_keys=["pixels"]),
-            Resize(w=img_size, h=img_size, in_keys=["pixels"])
-        )
-    )
+    transforms = []
+    if color_randomization and is_dmc:
+        from src.envs.variation_wrapper import DMControlColorRandomizer
+        transforms.append(DMControlColorRandomizer(seed=seed))
+    transforms += [
+        ToTensorImage(in_keys=["pixels"]),
+        Resize(w=img_size, h=img_size, in_keys=["pixels"]),
+    ]
 
-def make_torchrl_env(task: str, num_envs: int = 16, seed: int = 42, img_size: int = 64, frame_skip: int = 1) -> ParallelEnv:
+    return TransformedEnv(env, Compose(*transforms))
+
+
+def make_torchrl_env(
+    task: str,
+    num_envs: int = 16,
+    seed: int = 42,
+    img_size: int = 64,
+    frame_skip: int = 1,
+    color_randomization: bool = False,
+) -> ParallelEnv:
     """
-    Propuesta 1: TorchRL ParallelEnv con constructores directos, sin pasar por Envpool.
+    TorchRL ParallelEnv con constructores directos.
+
+    Args:
+        color_randomization: Si True, randomiza colores de MuJoCo en cada reset
+                             (domain randomization visual — solo DMControl).
     """
     # EnvCreator empaqueta la inicialización de manera segura entre procesos
-    create_env_fn = EnvCreator(lambda: _make_single_env(task, img_size=img_size, frame_skip=frame_skip))
+    create_env_fn = EnvCreator(
+        lambda: _make_single_env(
+            task,
+            img_size=img_size,
+            frame_skip=frame_skip,
+            color_randomization=color_randomization,
+            seed=seed,
+        )
+    )
     
     parallel_env = ParallelEnv(
         num_workers=num_envs,
