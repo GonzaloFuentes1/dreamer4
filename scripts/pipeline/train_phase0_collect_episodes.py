@@ -64,6 +64,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 from envs import make_torchrl_env
 from policies import get_collect_policy
 
+try:
+    from hdf5_episode_dataset import HDF5EpisodeWriter
+    HDF5_AVAILABLE = True
+except ImportError:
+    HDF5_AVAILABLE = False
+    HDF5EpisodeWriter = None
+
 def _extract_frames(td, target_size=128):
     """
     Extrae la observación (imágenes) del TensorDict y las estandariza a (N, 3, H, W) uint8.
@@ -128,6 +135,11 @@ def main(cfg: DictConfig):
     
     out_demo.mkdir(parents=True, exist_ok=True)
     out_frames.mkdir(parents=True, exist_ok=True)
+
+    use_hdf5 = bool(dc.get("use_hdf5", HDF5_AVAILABLE))
+    if use_hdf5 and not HDF5_AVAILABLE:
+        print("[Phase 0] WARN: use_hdf5=true pero h5py no instalado. Usando .pt.")
+        use_hdf5 = False
     
     print(f"\n[Phase 0] Iniciando Recolección Múltiple. Destinos:")
     print(f"  - Demos:  {out_demo}")
@@ -137,6 +149,7 @@ def main(cfg: DictConfig):
     num_envs = dc.get("num_envs_per_task", 16)
     episodes_target = dc.get("n_episodes_per_task", 100)
     episode_len = int(dc.get("episode_len", 1000))
+    frame_skip = int(dc.get("frame_skip", 1))
     shard_size = dc.get("shard_size", 2048)
     target_img_size = dc.get("img_size", 128)
     target_action_dim = int(dc.get("action_dim", 16))
@@ -162,7 +175,7 @@ def main(cfg: DictConfig):
         
         # 1. Pipeline de Simulación
         print("[1/4] Levantando entorno EnvPool + TorchRL Wrappers...")
-        env = make_torchrl_env(task, num_envs=num_envs, seed=cfg.get("seed", 42), img_size=target_img_size)
+        env = make_torchrl_env(task, num_envs=num_envs, seed=cfg.get("seed", 42), img_size=target_img_size, frame_skip=frame_skip)
         
         # 2. Pipeline de la Política
         print("[2/4] Instanciando Política...")
@@ -182,6 +195,18 @@ def main(cfg: DictConfig):
         
         # Estructuras de almacenamiento
         buffer_frames = []
+
+        # HDF5 writer (si está habilitado)
+        hdf5_writer = None
+        if use_hdf5:
+            hdf5_path = out_demo / f"{task}.h5"
+            hdf5_writer = HDF5EpisodeWriter(
+                hdf5_path,
+                img_size=target_img_size,
+                action_dim=target_action_dim,
+                chunk_frames=512,
+            )
+            print(f"[Phase 0] HDF5 writer: {hdf5_path}")
         all_actions = []
         all_rewards = []
         all_episodes = []
@@ -284,6 +309,10 @@ def main(cfg: DictConfig):
             all_actions.append(acts)
             all_rewards.append(rews)
             all_episodes.append(ep_id_t)
+
+            # Flush HDF5 incremental (SWMR crash-safe)
+            if hdf5_writer is not None:
+                hdf5_writer.append_batch(frames, acts, rews, ep_id_t)
             
             # Flush a Disco (Sharding compatible con sharded_frame_dataset.py)
             current_buffer_size = sum([f.shape[0] for f in buffer_frames])
@@ -347,7 +376,15 @@ def main(cfg: DictConfig):
         }
         
         # Recorte al tamaño real de frames extraídos para que calce 1:1 localmente con el sharded loader.
-        total_steps_saved = sum([torch.load(p, weights_only=False)["frames"].shape[0] for p in list((out_frames / task).glob("*.pt"))])
+        if hdf5_writer is not None:
+            total_steps_saved = hdf5_writer.n_steps
+            hdf5_writer.finalize()
+            hdf5_writer = None
+        else:
+            total_steps_saved = sum([
+                torch.load(p, weights_only=False)["frames"].shape[0]
+                for p in sorted((out_frames / task).glob("*.pt"))
+            ])
         demo_data = {k: v[:total_steps_saved] for k, v in demo_data.items()}
         avg_ep_len = float(total_steps_saved) / float(max(episodes_collected, 1))
 

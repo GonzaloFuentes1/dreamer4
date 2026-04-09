@@ -9,8 +9,9 @@ import pytorch_lightning as pl
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
-from src.task_set import TASK_SET
+from task_set import TASK_SET
 from sharded_frame_dataset import ShardedFrameDataset
+from hdf5_episode_dataset import HDF5EpisodeDataset
 
 
 def _worker_init_fn(worker_id: int):
@@ -37,12 +38,28 @@ class FrameDataModule(pl.LightningDataModule):
     def setup(self, stage: str):
         dc = self.cfg.data
         tasks = list(dc.tasks) if dc.get("tasks") else TASK_SET
-        self._dataset = ShardedFrameDataset(
-            outdirs=list(dc.frame_dirs),
-            tasks=tasks,
-            seq_len=int(dc.seq_len_tokenizer),
-            iid_sampling=True,
-        )
+        # Detectar HDF5 en data_dirs (si existeн, los usamos en lugar de .pt shards)
+        data_dirs = list(dc.get("data_dirs", dc.get("frame_dirs", [])))
+        h5_paths = [
+            dd + f"/{t}.h5"
+            for dd in data_dirs
+            for t in tasks
+            if __import__("pathlib").Path(dd + f"/{t}.h5").exists()
+        ]
+        use_hdf5 = len(h5_paths) > 0 and dc.get("use_hdf5", True)
+        if use_hdf5:
+            self._dataset = HDF5EpisodeDataset(
+                h5_paths=h5_paths,
+                seq_len=int(dc.seq_len_tokenizer),
+                mode="frames",
+            )
+        else:
+            self._dataset = ShardedFrameDataset(
+                outdirs=list(dc.frame_dirs),
+                tasks=tasks,
+                seq_len=int(dc.seq_len_tokenizer),
+                iid_sampling=True,
+            )
 
     def train_dataloader(self) -> DataLoader:
         dc = self.cfg.data
