@@ -20,3 +20,4 @@ seq_len_dynamics: 32
 batch_size_dynamics: 24
 
 num_workers: 16
+frame_skip: 2

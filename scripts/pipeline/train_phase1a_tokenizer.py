@@ -1,66 +1,39 @@
 #!/usr/bin/env python
-# scripts/pipeline/train_phase1a_tokenizer.py — PyTorch Lightning + Hydra entry point
+# scripts/pipeline/train_phase1a_tokenizer.py — Phase 1a: Tokenizer training.
 #
 # Usage (single GPU):
-#   python train_tokenizer.py trainer.devices=1
+#   python train_phase1a_tokenizer.py trainer.devices=1
 #
 # Usage (8 GPUs, single node):
-#   python train_tokenizer.py trainer.devices=8
+#   python train_phase1a_tokenizer.py trainer.devices=8
 #
 # Override any config key at the CLI:
-#   python train_tokenizer.py tokenizer=small wandb.name=exp_001
+#   python train_phase1a_tokenizer.py tokenizer=small wandb.name=exp_001
 #
 # Hyperparameter sweep (Hydra multirun):
-#   python train_tokenizer.py -m tokenizer.d_model=128,256 tokenizer.depth=4,8
+#   python train_phase1a_tokenizer.py -m tokenizer.d_model=128,256 tokenizer.depth=4,8
 #
 # Resume from a Lightning checkpoint:
-#   python train_tokenizer.py resume=./logs/tokenizer_ckpts/last.ckpt
-import sys
-import os
+#   python train_phase1a_tokenizer.py resume=./logs/tokenizer_ckpts/last.ckpt
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
-CONFIG_PATH = os.path.join(REPO_ROOT, "configs")
+from train_utils import REPO_ROOT, CONFIG_PATH, make_checkpoint_callback, make_trainer  # noqa: E402 (sets sys.path)
 
 import hydra
 import pytorch_lightning as pl
 from omegaconf import DictConfig
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import LearningRateMonitor
 
 from lightning.tokenizer_module import TokenizerLightningModule
 from lightning.frame_datamodule import FrameDataModule
 from lightning.callbacks import TokenizerVizCallback
-
-torch_backends_setup = """
-import torch
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-"""
-exec(torch_backends_setup)  # noqa: S102
 
 
 @hydra.main(config_path=CONFIG_PATH, config_name="train_phase1a_tokenizer", version_base=None)
 def main(cfg: DictConfig) -> None:
     pl.seed_everything(cfg.seed, workers=True)
 
-    # ---- logger ----
-    logger = WandbLogger(
-        project=cfg.wandb.project,
-        name=cfg.wandb.name,
-        entity=cfg.wandb.entity if cfg.wandb.entity else None,
-        log_model=False,
-    )
-
-    # ---- callbacks ----
     callbacks = [
-        ModelCheckpoint(
-            dirpath=cfg.checkpoint.dirpath,
-            every_n_train_steps=cfg.checkpoint.every_n_train_steps,
-            save_top_k=cfg.checkpoint.save_top_k,
-            filename=cfg.checkpoint.filename,
-            save_last=True,
-        ),
+        make_checkpoint_callback(cfg),
         TokenizerVizCallback(
             viz_every=cfg.tokenizer.viz_every,
             max_items=cfg.tokenizer.viz_max_items,
@@ -69,23 +42,12 @@ def main(cfg: DictConfig) -> None:
         LearningRateMonitor(logging_interval="step"),
     ]
 
-    # ---- trainer ----
-    tc = cfg.trainer
-    trainer = pl.Trainer(
-        max_steps=tc.max_steps,
-        precision=tc.precision,
-        accumulate_grad_batches=tc.accumulate_grad_batches,
-        gradient_clip_val=tc.gradient_clip_val,
-        log_every_n_steps=tc.log_every_n_steps,
-        num_nodes=tc.num_nodes,
-        devices=tc.devices,
-        strategy=tc.strategy,
-        logger=logger,
-        callbacks=callbacks,
-        enable_progress_bar=tc.enable_progress_bar,
+    trainer = make_trainer(
+        cfg,
+        callbacks,
+        grad_clip=cfg.trainer.get("gradient_clip_val"),
     )
 
-    # ---- fit ----
     model      = TokenizerLightningModule(cfg)
     datamodule = FrameDataModule(cfg)
 

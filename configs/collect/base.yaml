@@ -10,6 +10,7 @@ out_data_dir: ./data/collected/demos
 out_frames_dir: ./data/collected/frames
 shard_size: 2048
 img_size: 128
+frame_skip: 1  # 1 = sin frame skip (pretrain). Usa 2 para finetuning/agente.
 save_preview_video: false
 preview_video_max_frames: 300
 preview_video_fps: 20

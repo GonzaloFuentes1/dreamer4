@@ -3,7 +3,7 @@ import os
 import bisect
 import random
 from pathlib import Path
-from typing import Sequence, List, Dict, Union, Optional
+from typing import Sequence, List, Dict, Union
 
 import torch
 from torch.utils.data import Dataset
@@ -19,7 +19,8 @@ class ShardedFrameDataset(Dataset):
 
     If iid_sampling=True, ignores idx and samples a random starting position
     uniformly over all valid sequence starts across all shards.
-    """
+
+"""
 
     def __init__(
         self,

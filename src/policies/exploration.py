@@ -262,7 +262,7 @@ class DreamerV4AgentPolicy(nn.Module):
                 sig_t  = torch.full((B, T_ctx), self._k_max - 1, device=self.target_dev, dtype=torch.long)
 
                 _, h_t  = self.dyn(self.act_buf, step_t, sig_t, self.z_buf,
-                                   act_mask=None, agent_tokens=self.task_buf)
+                                   act_mask=torch.ones_like(self.act_buf), agent_tokens=self.task_buf)
                 h_flat  = h_t[:, -1].flatten(1)
                 act_mask = torch.ones(B, self.d_action, device=self.target_dev)
                 _, action = self.policy_head.sample(h_flat, act_mask=act_mask)

@@ -45,6 +45,8 @@ critic_coef: 1.0         # weight on value-head twohot loss
 # ---- Optimizer ---------------------------------------------------------------
 lr: 5.0e-5
 weight_decay: 1.0e-5
+warmup_steps: 500
+lr_schedule: constant_with_warmup
 grad_clip: 100.0
 
 # ---- Evaluation / logging ----------------------------------------------------

@@ -45,9 +45,11 @@ critic_coef: 1.0         # weight on value-head twohot loss
 # ---- Optimizer ---------------------------------------------------------------
 lr: 5.0e-5
 weight_decay: 1.0e-5
-grad_clip: 100.0
+warmup_steps: 500
+lr_schedule: constant_with_warmup
+grad_clip: 10.0
 
 # ---- Evaluation / logging ----------------------------------------------------
-eval_every: 1000
-eval_n_episodes: 3       # episodes por task en evaluación online
-eval_episode_len: 1000   # pasos máximos por episodio
+eval_every: 5000
+eval_n_episodes: 1       # 1 episodio por task — la eval online es lenta
+eval_episode_len: 500    # frame_skip=2 → 500 agent steps = 1000 physics steps

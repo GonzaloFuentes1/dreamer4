@@ -10,6 +10,7 @@ dynamics_ckpt: ???
 
 # ── Dynamics architecture (must match Phase-1 checkpoint) ───────────────────
 packing_factor: 2
+
 d_model_dyn: 512
 dyn_depth: 8
 n_heads: 4
@@ -36,12 +37,11 @@ action_dim: 16
 mtp_length: 8            # multi-token prediction look-ahead (L in eq. 9)
 
 # ── Loss weights ────────────────────────────────────────────────────────────
-bc_coef: 1.0             # weight on behavior-cloning loss
-reward_coef: 1.0         # weight on reward-model loss
-
 # ── Optimizer ───────────────────────────────────────────────────────────────
 lr: 1.0e-4
 weight_decay: 1.0e-2
+warmup_steps: 500
+lr_schedule: constant_with_warmup
 grad_clip: 1.0
 
 # ── Evaluation / logging ────────────────────────────────────────────────────

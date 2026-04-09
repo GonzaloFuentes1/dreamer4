@@ -31,12 +31,11 @@ mtp_length: 8
 hidden_dim: 512
 action_dim: 16
 
-bc_coef: 1.0
-reward_coef: 2.0
-
 lr: 3.0e-4
 weight_decay: 1.0e-2
-grad_clip: 10.0
+warmup_steps: 500
+lr_schedule: constant_with_warmup
+grad_clip: 1.0
 eval_every: 10000
 eval_batch_size: 4
 eval_max_items: 4

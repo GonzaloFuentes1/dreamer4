@@ -142,6 +142,11 @@ class TokenizerLightningModule(pl.LightningModule):
     def training_step(self, batch: torch.Tensor, batch_idx: int):
         # batch: (B, T, C, H, W) float32 in [0, 1] from FrameDataModule
         x = batch
+        B, T, C, H, W = x.shape
+        assert H == self._H and W == self._W, (
+            f"Frame size {H}x{W} != model size {self._H}x{self._W}. "
+            f"Pre-convert your dataset to {self._H}x{self._W} with scripts/convert_frames_to_res.py"
+        )
         patches = temporal_patchify(x, self._patch)  # (B,T,Np,Dp)
 
         if self._discrete:

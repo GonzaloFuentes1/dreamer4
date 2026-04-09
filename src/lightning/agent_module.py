@@ -482,6 +482,7 @@ class AgentLightningModule(pl.LightningModule):
 
         # ── Reward annotation (frozen RewardHead) ────────────────────────
         rew_imag = self._reward_head.predict(h_bh).view(B_img, horizon).detach()
+        rew_imag = rew_imag.clamp(-10.0, 10.0)   # guard against OOD reward head outputs
 
         # ── Value predictions (trainable ValueHead) ──────────────────────
         v_logits  = self.value_head.forward(h_bh).view(B_img, horizon, -1)
@@ -542,6 +543,7 @@ class AgentLightningModule(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def configure_optimizers(self):
+        import math
         ac     = self.cfg.agent
         params = [
             p
@@ -551,9 +553,23 @@ class AgentLightningModule(pl.LightningModule):
             )
             if p.requires_grad
         ]
-        return torch.optim.AdamW(
+        opt = torch.optim.AdamW(
             params,
             lr=float(ac.lr),
             weight_decay=float(ac.weight_decay),
             betas=(0.9, 0.999),
         )
+        warmup = int(ac.get("warmup_steps", 500))
+        total  = int(self.trainer.max_steps)
+        schedule = str(ac.get("lr_schedule", "constant_with_warmup")).lower()
+        if warmup > 0 and total > 0:
+            def lr_lambda(step: int) -> float:
+                if step < warmup:
+                    return step / max(1, warmup)
+                if schedule == "constant_with_warmup":
+                    return 1.0
+                progress = (step - warmup) / max(1, total - warmup)
+                return 0.5 * (1.0 + math.cos(math.pi * progress))
+            sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+            return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
+        return opt

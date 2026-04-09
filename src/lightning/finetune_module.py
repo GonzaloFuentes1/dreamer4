@@ -33,90 +33,8 @@ from model import (
 )
 from losses import dynamics_pretrain_loss
 from agent import PolicyHead, RewardHead
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Checkpoint loader helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _load_frozen_tokenizer(ckpt_path: str, device: torch.device):
-    """Load tokenizer checkpoint → frozen Encoder + Decoder + tok_args dict."""
-    from model import Encoder, Decoder
-
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-
-    # Support both Lightning checkpoints and legacy raw-dict checkpoints.
-    if "state_dict" in ckpt:
-        hp = ckpt.get("hyper_parameters", {})
-        tc = hp.get("cfg", {}).get("tokenizer", {})
-        tok_args = dict(tc) if tc else {}
-        full_sd  = ckpt["state_dict"]
-        model_sd = {k[len("model."):]: v for k, v in full_sd.items() if k.startswith("model.")}
-        # Strip _orig_mod. prefix added by torch.compile()
-        model_sd = {k.replace("_orig_mod.", ""): v for k, v in model_sd.items()}
-    else:
-        tok_args = dict(ckpt.get("args", {}))
-        model_sd = ckpt["model"]
-        # Strip _orig_mod. prefix added by torch.compile()
-        model_sd = {k.replace("_orig_mod.", ""): v for k, v in model_sd.items()}
-
-    H         = int(tok_args.get("H", 128))
-    W         = int(tok_args.get("W", 128))
-    C         = int(tok_args.get("C", 3))
-    patch     = int(tok_args.get("patch", 4))
-    n_patches = (H // patch) * (W // patch)
-    d_patch   = patch * patch * C
-
-    _enc_kwargs = dict(
-        patch_dim=d_patch,
-        d_model=int(tok_args.get("d_model", 256)),
-        n_latents=int(tok_args.get("n_latents", 16)),
-        n_patches=n_patches,
-        n_heads=int(tok_args.get("n_heads", 4)),
-        depth=int(tok_args.get("depth", 8)),
-        dropout=0.0,
-        mlp_ratio=float(tok_args.get("mlp_ratio", 4.0)),
-        time_every=int(tok_args.get("time_every", 1)),
-        latents_only_time=bool(tok_args.get("latents_only_time", True)),
-        mae_p_min=0.0,
-        mae_p_max=0.0,
-    )
-    if tok_args.get("discrete", False):
-        from model import DiscreteEncoder
-        enc = DiscreteEncoder(
-            **_enc_kwargs,
-            n_categories=int(tok_args.get("d_bottleneck", 32)),
-            temperature=float(tok_args.get("temperature", 1.0)),
-        )
-    else:
-        enc = Encoder(
-            **_enc_kwargs,
-            d_bottleneck=int(tok_args.get("d_bottleneck", 32)),
-        )
-    dec = Decoder(
-        d_bottleneck=int(tok_args.get("d_bottleneck", 32)),
-        d_model=int(tok_args.get("d_model", 256)),
-        n_heads=int(tok_args.get("n_heads", 4)),
-        depth=int(tok_args.get("depth", 8)),
-        n_latents=int(tok_args.get("n_latents", 16)),
-        n_patches=n_patches,
-        d_patch=d_patch,
-        dropout=0.0,
-        mlp_ratio=float(tok_args.get("mlp_ratio", 4.0)),
-        time_every=int(tok_args.get("time_every", 1)),
-        latents_only_time=bool(tok_args.get("latents_only_time", True)),
-    )
-    enc_sd = {k[len("encoder."):]: v for k, v in model_sd.items() if k.startswith("encoder.")}
-    dec_sd = {k[len("decoder."):]: v for k, v in model_sd.items() if k.startswith("decoder.")}
-    enc.load_state_dict(enc_sd, strict=True)
-    dec.load_state_dict(dec_sd, strict=True)
-    enc = enc.to(device).eval()
-    dec = dec.to(device).eval()
-    for p in enc.parameters():
-        p.requires_grad_(False)
-    for p in dec.parameters():
-        p.requires_grad_(False)
-    return enc, dec, tok_args
+from checkpoint_utils import load_frozen_tokenizer
+from loss_norm import RunningRMS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,6 +69,12 @@ class FinetuneLightningModule(pl.LightningModule):
         self.d_spatial:      int = 0
         self.packing_factor: int = 2
 
+        # RMS loss normalisation (Dreamer 4 paper): each loss term is divided by
+        # its running RMS so that heterogeneous losses are automatically balanced.
+        self.rms_wm  = RunningRMS()
+        self.rms_bc  = RunningRMS()
+        self.rms_rew = RunningRMS()
+
     # ------------------------------------------------------------------
     # Lightning lifecycle
     # ------------------------------------------------------------------
@@ -159,7 +83,7 @@ class FinetuneLightningModule(pl.LightningModule):
         ft = self.cfg.finetune
 
         # ---- Frozen encoder (stays outside DDP / optimizer) ----------
-        encoder, decoder, tok_args = _load_frozen_tokenizer(ft.tokenizer_ckpt, self.device)
+        encoder, decoder, tok_args = load_frozen_tokenizer(ft.tokenizer_ckpt, self.device)
         object.__setattr__(self, "_encoder", encoder)
         object.__setattr__(self, "_decoder", decoder)
 
@@ -314,17 +238,26 @@ class FinetuneLightningModule(pl.LightningModule):
         # ── Reward model loss (eq. 9 second sum) ──────────────────────────
         rew_loss = self.reward_head.mtp_loss(h_flat, rew)
 
-        # ── Total ──────────────────────────────────────────────────────────
-        loss = wm_loss + ft.bc_coef * bc_loss + ft.reward_coef * rew_loss
+        # ── Total (RMS-normalised, eq. 9 + Dreamer 4 loss normalisation) ──
+        wm_norm  = self.rms_wm.normalize(wm_loss)
+        bc_norm  = self.rms_bc.normalize(bc_loss)
+        rew_norm = self.rms_rew.normalize(rew_loss)
+        loss     = wm_norm + bc_norm + rew_norm
 
         self.log_dict({
             "loss/total":         loss,
             "loss/wm":            wm_loss,
             "loss/bc":            bc_loss,
             "loss/reward":        rew_loss,
+            "loss/wm_norm":       wm_norm,
+            "loss/bc_norm":       bc_norm,
+            "loss/rew_norm":      rew_norm,
             "loss/flow_mse":      wm_aux["flow_mse"],
             "loss/bootstrap_mse": wm_aux["bootstrap_mse"],
             "stats/B_self":       float(B_self),
+            "stats/rms_wm":       self.rms_wm.sq.sqrt(),
+            "stats/rms_bc":       self.rms_bc.sq.sqrt(),
+            "stats/rms_rew":      self.rms_rew.sq.sqrt(),
         }, on_step=True, on_epoch=False, prog_bar=True, sync_dist=False)
 
         self._last_frames = obs_u8[:, :-1].float().div(255.0)
@@ -367,6 +300,7 @@ class FinetuneLightningModule(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def configure_optimizers(self):
+        import math
         ft = self.cfg.finetune
         params = (
             list(self.dyn.parameters())
@@ -374,9 +308,23 @@ class FinetuneLightningModule(pl.LightningModule):
             + list(self.policy_head.parameters())
             + list(self.reward_head.parameters())
         )
-        return torch.optim.AdamW(
+        opt = torch.optim.AdamW(
             params,
             lr=float(ft.lr),
             weight_decay=float(ft.weight_decay),
             betas=(0.9, 0.999),
         )
+        warmup = int(ft.get("warmup_steps", 500))
+        total  = int(self.trainer.max_steps)
+        schedule = str(ft.get("lr_schedule", "constant_with_warmup")).lower()
+        if warmup > 0 and total > 0:
+            def lr_lambda(step: int) -> float:
+                if step < warmup:
+                    return step / max(1, warmup)
+                if schedule == "constant_with_warmup":
+                    return 1.0
+                progress = (step - warmup) / max(1, total - warmup)
+                return 0.5 * (1.0 + math.cos(math.pi * progress))
+            sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+            return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
+        return opt

@@ -198,11 +198,12 @@ class AgentEvalCallback(pl.Callback):
         self,
         tasks: list,
         eval_every: int = 2000,
-        n_episodes: int = 3,
+        n_episodes: int = 1,
         episode_len: int = 500,
         context_len: int = 16,
         img_size: int = 128,
         camera_id: int = 0,
+        frame_skip: int = 2,
     ):
         self.tasks       = list(tasks)
         self.eval_every  = int(eval_every)
@@ -211,6 +212,7 @@ class AgentEvalCallback(pl.Callback):
         self.context_len = int(context_len)
         self.img_size    = int(img_size)
         self.camera_id   = int(camera_id)
+        self.frame_skip  = int(frame_skip)
 
     def on_train_batch_end(
         self,
@@ -339,7 +341,7 @@ class AgentEvalCallback(pl.Callback):
                         sig_t  = torch.full((1, T_ctx), k_max - 1,  device=device, dtype=torch.long)
 
                         _, h_t = dyn(act_buf, step_t, sig_t, z_buf,
-                                     act_mask=None, agent_tokens=task_buf)
+                                     act_mask=torch.ones_like(act_buf), agent_tokens=task_buf)
                         h_flat = h_t[:, -1].flatten(1)  # (1, state_dim)
 
                         act_mask = torch.ones(1, action_dim, device=device)
@@ -349,10 +351,17 @@ class AgentEvalCallback(pl.Callback):
                     # Rescale [-1,1] → env action spec
                     spec = env.action_spec()
                     lo, hi = spec.minimum, spec.maximum
-                    action_env = ((action_np[:len(lo)] + 1.0) / 2.0 * (hi - lo) + lo).clip(lo, hi)
+                    n_active = len(lo)
+                    action_env = ((action_np[:n_active] + 1.0) / 2.0 * (hi - lo) + lo).clip(lo, hi)
 
-                    ts = env.step(action_env)
-                    ep_return += float(ts.reward or 0.0)
+                    # frame_skip: advance physics N steps, accumulate reward
+                    for _ in range(self.frame_skip):
+                        ts = env.step(action_env)
+                        ep_return += float(ts.reward or 0.0)
+                        if ts.last():
+                            break
+                    # Zero out inactive dims so dynamics sees the same format as training
+                    action_np[n_active:] = 0.0
                     prev_act = torch.from_numpy(action_np).to(device).view(1, 1, -1)
                     step_count += 1
 

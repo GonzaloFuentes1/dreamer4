@@ -1,265 +1,256 @@
 #!/bin/bash
-# run_cycles.sh — Ciclo recursivo completo dreamer4
+# run_cycles.sh — Pipeline activo dreamer4 (resolución 64×64 o 128×128)
 #
 # Uso:
-#   srun --gres=gpu:h100:1 --cpus-per-task=8  --mem=64G  --time=48:00:00 bash run_cycles.sh ...
-#   srun --gres=gpu:h100:2 --cpus-per-task=16 --mem=128G --time=48:00:00 bash run_cycles.sh ...
-#   srun --gres=gpu:h100:3 --cpus-per-task=24 --mem=192G --time=48:00:00 bash run_cycles.sh ...
+#   RES=64  srun --nodes=1 --ntasks=1 --gpus=1 --cpus-per-task=64 --mem=128G --time=24:00:00 bash scripts/pipeline/run_cycles.sh
+#   RES=128 srun --nodes=1 --ntasks=1 --gpus=3 --cpus-per-task=48 --mem=256G --time=72:00:00 bash scripts/pipeline/run_cycles.sh
 #
-# Ejemplos:
-#   bash run_cycles.sh 10 50 1000 "walker-walk,cheetah-run"   # real ~5h con los defaults
-#   bash run_cycles.sh 2 5 200 "walker-walk,cheetah-run" 500  # smoke test
-#
-# Ciclo 0:  datos random  → Phase 1a → 1b → 2 → 3  → agent_v0
-# Ciclo N:  datos agent   → Phase 1a → 1b → 2 → 3  → agent_vN  (1a+1b siempre)
+# Variables de entorno principales (todas opcionales):
+#   RES=64|128                     resolución (default: 64)
+#   K=30                           número de ciclos
+#   RUN_TAG=mi_experimento         nombre del run
+#   TASKS=walker-run,cheetah-run   tareas separadas por coma
+#   START_FROM_DYNAMICS_CYCLE0=true  usar tokenizer y datos de otro run en ciclo 0
+#   SOURCE_RUN_TAG=active_64x64_v2   run fuente (requiere START_FROM_DYNAMICS_CYCLE0=true)
+#   CYCLE0_PRETRAINED_DATA=./runs/…/dataset/cycle0
+#   SEED_TOKENIZER_CKPT=./runs/…/tokenizer/last.ckpt
+#   COLD_1A, STEPS_1A, COLD_1B, STEPS_1B, COLD_2, STEPS_2, COLD_3, STEPS_3
+#   BATCH_TOK, BATCH_DYN, BATCH_FT, IMAG_BATCH, NUM_WORKERS, DEVICES
 
 set -e
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+source "$(dirname "$0")/_pipeline_lib.sh"
+pipeline_setup "$ROOT_DIR"
 cd "$ROOT_DIR"
-if [[ -f "$ROOT_DIR/.env" ]]; then source "$ROOT_DIR/.env"; fi
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ARGUMENTOS DE LÍNEA DE COMANDOS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-K=${1:-20}             # número de ciclos
-N_EPISODES=${2:-25}    # episodios por tarea — ciclo 0 (colección random)
-EPISODE_LEN=${3:-1000} # pasos por episodio  — ciclo 0
-TASKS=${4:-"walker-stand,walker-walk,walker-run,cheetah-run,hopper-stand,hopper-hop,reacher-easy,reacher-hard,cartpole-swingup,finger-spin"}
-MAX_STEPS=${5:-""}     # smoke test: sobreescribe TODOS los STEPS_* si se pasa
+# ── Resolución ────────────────────────────────────────────────────────────────
+RES=${RES:-64}
+case "$RES" in
+  64)
+    CFG_SUFFIX=base_64x64
+    IMG_SIZE=64
+    BATCH_TOK=${BATCH_TOK:-48};  BATCH_DYN=${BATCH_DYN:-16}
+    BATCH_FT=${BATCH_FT:-16};    IMAG_BATCH=${IMAG_BATCH:-24}
+    COLD_1A=${COLD_1A:-20000};   STEPS_1A=${STEPS_1A:-2000}
+    COLD_1B=${COLD_1B:-20000};   STEPS_1B=${STEPS_1B:-2000}
+    COLD_2=${COLD_2:-3000};      STEPS_2=${STEPS_2:-2000}
+    COLD_3=${COLD_3:-10000};     STEPS_3=${STEPS_3:-4000}
+    RUN_TAG="${RUN_TAG:-active_64x64}"
+    ;;
+  128)
+    CFG_SUFFIX=base_128x128
+    IMG_SIZE=128
+    BATCH_TOK=${BATCH_TOK:-16};  BATCH_DYN=${BATCH_DYN:-16}
+    BATCH_FT=${BATCH_FT:-16};    IMAG_BATCH=${IMAG_BATCH:-24}
+    COLD_1A=${COLD_1A:-20000};   STEPS_1A=${STEPS_1A:-1500}
+    COLD_1B=${COLD_1B:-20000};   STEPS_1B=${STEPS_1B:-1000}
+    COLD_2=${COLD_2:-1000};      STEPS_2=${STEPS_2:-1000}
+    COLD_3=${COLD_3:-2000};      STEPS_3=${STEPS_3:-2000}
+    RUN_TAG="${RUN_TAG:-active_128x128}"
+    ;;
+  *)
+    echo "Error: RES debe ser 64 o 128"; exit 1
+    ;;
+esac
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# CONFIGURACIÓN DE HARDWARE
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-if [[ -n "${DEVICES:-}" ]]; then
-    DEVICES="$DEVICES"
-elif [[ -n "${SLURM_GPUS_ON_NODE:-}" ]]; then
-    DEVICES="$SLURM_GPUS_ON_NODE"
-elif [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-    IFS=',' read -ra _cuda_ids <<< "$CUDA_VISIBLE_DEVICES"
-    DEVICES="${#_cuda_ids[@]}"
-else
-    DEVICES=1
-fi
-echo "[run_cycles] trainer.devices=$DEVICES"
+# ── Configuración ─────────────────────────────────────────────────────────────
+K=${K:-30}
+detect_devices
+TASKS="${TASKS:-walker-run,cheetah-run,hopper-hop,finger-spin,reacher-hard}"
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STEPS POR FASE  (calibrados para DEVICES=5, 10 tasks, 25 eps, 1000 steps)
-#
-#  Referencia rápida con DEVICES=5, 10 tasks, batch defaults abajo:
-#    Ciclo 0 datos:  10 tasks × 25 eps × 1000 steps = 250k frames / 242k windows
-#    Ciclos >0 data: +10 tasks × 20 eps × 500 steps = +100k frames / +97k windows
-#
-#    1 época tokenizer  = 250k / (24×5) = 2,083 steps
-#    1 época dynamics   = 242k / (96×5) =   505 steps
-#
-#    Cold start (ciclo 0): más steps para arrancar desde cero
-#    Warm start (ciclos >0): menos steps, parte del checkpoint anterior
-#
-#    Phase 1a: cold=3 épocas tok, warm=1 época tok
-#    Phase 1b: cold=5 épocas dyn, warm=2 épocas dyn
-#    Phase 2:  cold=5 épocas dyn, warm=3 épocas dyn
-#    Phase 3:  cold=10 épocas,    warm=10 épocas
-#
-#    Total 20 ciclos: ~12k steps/ciclo (ciclos 1-19) + cold ≈ 24h con 5×H100
-#
-#  Para smoke test rápido: bash run_cycles.sh 2 5 200 "" 500
-#    → MAX_STEPS=500 sobreescribe todo
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Cold start — ciclo 0 (desde cero, sin checkpoint previo)
-COLD_1A=10_000         # tokenizer   ~3.0 épocas cold  (2,083 steps/época)
-COLD_1B=2_500         # dynamics    ~5.0 épocas cold  (505 steps/época)
-COLD_2=2_500          # finetuning  ~5.0 épocas cold  (505 steps/época)
-COLD_3=5_000          # agente PMPO ~10 épocas cold
+AGENT_N_EPISODES=${AGENT_N_EPISODES:-32}   # múltiplo de COLLECT_NUM_ENVS para evitar overshoot
+AGENT_EPISODE_LEN=${AGENT_EPISODE_LEN:-1000}
+COLLECT_MIN_FRAMES_PER_TASK=${COLLECT_MIN_FRAMES_PER_TASK:-$((AGENT_N_EPISODES * AGENT_EPISODE_LEN))}
+COLLECT_NUM_ENVS=${COLLECT_NUM_ENVS:-16}
+COLLECT_SAVE_PREVIEW_VIDEO=${COLLECT_SAVE_PREVIEW_VIDEO:-true}
+COLLECT_PREVIEW_VIDEO_BACKEND=${COLLECT_PREVIEW_VIDEO_BACKEND:-torchrl}
+COLLECT_PREVIEW_VIDEO_FPS=${COLLECT_PREVIEW_VIDEO_FPS:-30}
+COLLECT_PREVIEW_VIDEO_MAX_FRAMES=${COLLECT_PREVIEW_VIDEO_MAX_FRAMES:-$AGENT_EPISODE_LEN}
 
-# # Warm start — ciclos 1+ (resume desde checkpoint anterior)
-STEPS_1A=5_000        # tokenizer   ~1.0 época  (2,083 steps/época)
-STEPS_1B=5_000        # dynamics    ~2.0 épocas (505 steps/época)
-STEPS_2=5_000         # finetuning  ~3.0 épocas (505 steps/época)
-STEPS_3=5_000         # agente PMPO ~10 épocas equiv.
+NUM_WORKERS=${NUM_WORKERS:-4}
+AGENT_DDP_STRATEGY=${AGENT_DDP_STRATEGY:-ddp_find_unused_parameters_true}
 
-# Si MAX_STEPS está seteado (modo smoke test), sobreescribe todo
-if [[ -n "$MAX_STEPS" ]]; then
-    COLD_1A=$MAX_STEPS; COLD_1B=$MAX_STEPS; COLD_2=$MAX_STEPS; COLD_3=$MAX_STEPS
-    STEPS_1A=$MAX_STEPS; STEPS_1B=$MAX_STEPS; STEPS_2=$MAX_STEPS; STEPS_3=$MAX_STEPS
-fi
+# Hiperparámetros del tokenizer (sobreescribibles por env var)
+TOKENIZER_MAE_P_MAX=${TOKENIZER_MAE_P_MAX:-0.75}
+TOKENIZER_D_MODEL=${TOKENIZER_D_MODEL:-256}
+TOKENIZER_N_HEADS=${TOKENIZER_N_HEADS:-4}
+TOKENIZER_DEPTH=${TOKENIZER_DEPTH:-8}
+TOKENIZER_N_LATENTS=${TOKENIZER_N_LATENTS:-16}
+TOKENIZER_D_BOTTLENECK=${TOKENIZER_D_BOTTLENECK:-32}
+TOKENIZER_TIME_EVERY=${TOKENIZER_TIME_EVERY:-1}
+TOKENIZER_LATENTS_ONLY_TIME=${TOKENIZER_LATENTS_ONLY_TIME:-true}
+TOKENIZER_SCALE_POS_EMBEDS=${TOKENIZER_SCALE_POS_EMBEDS:-false}
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# BATCH SIZES  (optimizados para H100 80GB — aumentar si hay OOM reducir si crash)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BATCH_TOK=24          # frames por GPU — tokenizer  (S=1040 tokens, atención O(S²), NO subir mucho)
-BATCH_DYN=64          # seqs  por GPU  — dynamics/finetune/agente (S~19 tokens, puede ser grande)
-NUM_WORKERS=4         # workers DataLoader por GPU (4 GPUs × 4 = 16 total, conserva RAM)
-IMAG_BATCH=96         # rollouts de imaginación por step (agent_module)
+# ── Rutas ─────────────────────────────────────────────────────────────────────
+RUN_ROOT="./runs/${RUN_TAG}"
+RUN_DATA_ROOT="${RUN_ROOT}/dataset"
+TOK_CKPT_DIR="${RUN_ROOT}/tokenizer";    TOK_CKPT="${TOK_CKPT_DIR}/last.ckpt"
+DYN_CKPT_DIR="${RUN_ROOT}/dynamics";     DYN_CKPT="${DYN_CKPT_DIR}/last.ckpt"
+FT_CKPT_DIR="${RUN_ROOT}/finetune";      FT_CKPT="${FT_CKPT_DIR}/last.ckpt"
+AGENT_CKPT_DIR="${RUN_ROOT}/agent";      AGENT_CKPT="${AGENT_CKPT_DIR}/last.ckpt"
+AGENT_CYCLE_CKPT_DIR="${RUN_ROOT}/cycles"
+mkdir -p "$TOK_CKPT_DIR" "$DYN_CKPT_DIR" "$FT_CKPT_DIR" \
+         "$AGENT_CKPT_DIR" "$AGENT_CYCLE_CKPT_DIR" "$RUN_DATA_ROOT"
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# COLECCIÓN CON POLÍTICA AGENTE (ciclos > 0)
-#   Menos episodios que ciclo 0 para que collect no sea el cuello de botella
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AGENT_N_EPISODES=20   # vs $N_EPISODES del ciclo 0
-AGENT_EPISODE_LEN=1000 # DMControl + mjwarp: mantener horizonte completo
+echo "[run_cycles] RES=${RES}x${RES}  devices=$DEVICES  run_tag=$RUN_TAG"
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# CHECKPOINTS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TOK_CKPT=./logs/tokenizer_ckpts/last.ckpt
-DYN_CKPT=./logs/dynamics_ckpts/last.ckpt
-FT_CKPT=./logs/finetune_ckpts/last.ckpt
-AGENT_CKPT=./logs/agent_ckpts/last.ckpt
+# ── Ciclo 0: opción de arrancar desde datos y tokenizer preexistentes ─────────
+START_FROM_DYNAMICS_CYCLE0=${START_FROM_DYNAMICS_CYCLE0:-false}
+SOURCE_RUN_TAG=${SOURCE_RUN_TAG:-active_${RES}x${RES}_v2}
+SOURCE_RUN_ROOT="./runs/${SOURCE_RUN_TAG}"
 
-# ── Overrides de tasks ───────────────────────────────────────────────────────
-TASKS_ARG=()
-DATA_TASKS_ARG=()
-if [[ -n "$TASKS" ]]; then
-    TASKS_ARG=("collect.tasks=[$TASKS]")
-    DATA_TASKS_ARG=("data.tasks=[$TASKS]")
-fi
+if [[ "$START_FROM_DYNAMICS_CYCLE0" == "true" ]]; then
+    CYCLE0_PRETRAINED_DATA=${CYCLE0_PRETRAINED_DATA:-${SOURCE_RUN_ROOT}/dataset/cycle0}
+    SEED_TOKENIZER_CKPT=${SEED_TOKENIZER_CKPT:-${SOURCE_RUN_ROOT}/tokenizer/last.ckpt}
+    echo "[run_cycles] start_from_dynamics_cycle0=true  source=$SOURCE_RUN_ROOT"
 
-# ── Tag W&B ──────────────────────────────────────────────────────────────────
-DATETAG=$(date +%m%d_%H%M)
-TASKTAG=${TASKS:-"all"}
-TASKTAG=$(echo "$TASKTAG" | tr ',' '+' | cut -c1-30)
-RUN_TAG="${DATETAG}_${TASKTAG}"
-
-# ── Acumulador de directorios de datos ───────────────────────────────────────
-DATA_DIRS=""
-FRAME_DIRS=""
-
-append_dirs() {
-    local data=$1 frames=$2
-    if [[ -z "$DATA_DIRS" ]]; then
-        DATA_DIRS="$data"; FRAME_DIRS="$frames"
-    else
-        DATA_DIRS="${DATA_DIRS},${data}"; FRAME_DIRS="${FRAME_DIRS},${frames}"
+    if [[ ! -d "$CYCLE0_PRETRAINED_DATA/demos" ]] || [[ ! -d "$CYCLE0_PRETRAINED_DATA/frames" ]]; then
+        echo "[run_cycles] error: CYCLE0_PRETRAINED_DATA inválido: $CYCLE0_PRETRAINED_DATA"; exit 1
     fi
-}
+    if [[ ! -f "$SEED_TOKENIZER_CKPT" ]]; then
+        echo "[run_cycles] error: tokenizer seed no encontrado: $SEED_TOKENIZER_CKPT"; exit 1
+    fi
+    if [[ ! -f "$TOK_CKPT" ]]; then
+        cp "$SEED_TOKENIZER_CKPT" "$TOK_CKPT"
+        echo "[run_cycles] tokenizer seed copiado → $TOK_CKPT"
+    fi
+fi
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# BUCLE PRINCIPAL
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ── Bucle principal ───────────────────────────────────────────────────────────
 for CYCLE in $(seq 0 $((K - 1))); do
-    echo ""
-    echo "════════════════════════════════════════"
-    echo " Ciclo $CYCLE / $((K-1))"
+    echo ""; echo "════════════════════════════════════════"
+    echo " Ciclo $CYCLE / $((K-1))  [${RES}x${RES}]"
     echo "════════════════════════════════════════"
 
-    OUT_DATA="./data/cycle${CYCLE}/demos"
-    OUT_FRAMES="./data/cycle${CYCLE}/frames"
+    OUT_DATA="${RUN_DATA_ROOT}/cycle${CYCLE}/demos"
+    OUT_FRAMES="${RUN_DATA_ROOT}/cycle${CYCLE}/frames"
+    OUT_VIDEOS="${RUN_DATA_ROOT}/cycle${CYCLE}/videos"
 
-    # ── Phase 0 — Colección ─────────────────────────────────────────────────
-    echo "[Phase 0] Recolectando datos..."
-    _all_tasks_present=1
-    IFS=',' read -ra _task_list <<< "$TASKS"
-    for _t in "${_task_list[@]}"; do
-        [[ -f "$OUT_DATA/${_t}.pt" ]] || { _all_tasks_present=0; break; }
-    done
-    if [[ "$CYCLE" -eq 0 ]] && [[ "$_all_tasks_present" -eq 1 ]]; then
-        echo "[Phase 0] Todos los tasks ya existen en $OUT_DATA — saltando recolección."
-    elif [[ "$CYCLE" -eq 0 ]]; then
-        python scripts/pipeline/launch_phase0_dist.py \
-            collect.n_episodes_per_task=$N_EPISODES \
-            collect.episode_len=$EPISODE_LEN \
-            collect.out_data_dir=$OUT_DATA \
-            collect.out_frames_dir=$OUT_FRAMES \
-            "${TASKS_ARG[@]}"
+    # Phase 0 — colección
+    if [[ "$CYCLE" -eq 0 && "$START_FROM_DYNAMICS_CYCLE0" == "true" ]]; then
+        echo "[Phase 0] Usando datos precolectados: $CYCLE0_PRETRAINED_DATA"
+        OUT_DATA="${CYCLE0_PRETRAINED_DATA}/demos"
+        OUT_FRAMES="${CYCLE0_PRETRAINED_DATA}/frames"
     else
-        python scripts/pipeline/launch_phase0_dist.py \
-            collect.policy=agent \
-            collect.agent_ckpt=$AGENT_CKPT \
-            collect.n_episodes_per_task=$AGENT_N_EPISODES \
-            collect.episode_len=$AGENT_EPISODE_LEN \
-            collect.out_data_dir=$OUT_DATA \
-            collect.out_frames_dir=$OUT_FRAMES \
-            "${TASKS_ARG[@]}"
+        COLLECT_POLICY=$([[ "$CYCLE" -eq 0 ]] && echo "random" || echo "agent")
+        echo "[Phase 0] Recolectando — política=$COLLECT_POLICY ciclo=$CYCLE"
+        COLLECT_ARGS=(
+            collect.policy=$COLLECT_POLICY
+            collect.num_envs_per_task=$COLLECT_NUM_ENVS
+            collect.n_episodes_per_task=$AGENT_N_EPISODES
+            ++collect.episode_len=$AGENT_EPISODE_LEN
+            ++collect.min_frames_per_task=$COLLECT_MIN_FRAMES_PER_TASK
+            collect.out_data_dir=$OUT_DATA
+            collect.out_frames_dir=$OUT_FRAMES
+            collect.out_videos_dir=$OUT_VIDEOS
+            collect.img_size=$IMG_SIZE
+            ++collect.save_preview_video=$COLLECT_SAVE_PREVIEW_VIDEO
+            ++collect.preview_video_backend=$COLLECT_PREVIEW_VIDEO_BACKEND
+            ++collect.preview_video_fps=$COLLECT_PREVIEW_VIDEO_FPS
+            ++collect.preview_video_max_frames=$COLLECT_PREVIEW_VIDEO_MAX_FRAMES
+            "collect.tasks=[$TASKS]"
+        )
+        [[ "$CYCLE" -gt 0 ]] && COLLECT_ARGS+=(collect.agent_ckpt=$AGENT_CKPT)
+        python scripts/pipeline/launch_phase0_dist.py "${COLLECT_ARGS[@]}"
     fi
-
     append_dirs "$OUT_DATA" "$OUT_FRAMES"
 
-    # ── Phase 1a — Tokenizer (todos los ciclos, warm desde ciclo 1) ──────────
-    echo "[Phase 1a] Entrenando tokenizer..."
-    RESUME_TOK_ARG=()
-    if [[ "$CYCLE" -eq 0 ]] && [[ -f "$TOK_CKPT" ]]; then
-        echo "[Phase 1a] Checkpoint existente en ciclo 0 — saltando (usar ciclos>0 para warm)."
+    # Phase 1a — Tokenizer
+    if [[ "$CYCLE" -eq 0 && "$START_FROM_DYNAMICS_CYCLE0" == "true" ]]; then
+        echo "[Phase 1a] Saltado — usando tokenizer seed"
     else
-        if [[ "$CYCLE" -gt 0 ]] && [[ -f "$TOK_CKPT" ]]; then
-            RESUME_TOK_ARG=("resume=$TOK_CKPT")
-            CUR_STEPS_1A=$STEPS_1A
-        else
-            CUR_STEPS_1A=$COLD_1A
-        fi
+        echo "[Phase 1a] Entrenando tokenizer..."
+        phase_steps $COLD_1A $STEPS_1A "$TOK_CKPT" $CYCLE
         python scripts/pipeline/train_phase1a_tokenizer.py \
+            tokenizer=$CFG_SUFFIX \
+            tokenizer.d_model=$TOKENIZER_D_MODEL \
+            tokenizer.n_heads=$TOKENIZER_N_HEADS \
+            tokenizer.depth=$TOKENIZER_DEPTH \
+            tokenizer.n_latents=$TOKENIZER_N_LATENTS \
+            tokenizer.d_bottleneck=$TOKENIZER_D_BOTTLENECK \
+            tokenizer.time_every=$TOKENIZER_TIME_EVERY \
+            tokenizer.latents_only_time=$TOKENIZER_LATENTS_ONLY_TIME \
+            tokenizer.scale_pos_embeds=$TOKENIZER_SCALE_POS_EMBEDS \
+            tokenizer.mae_p_max=$TOKENIZER_MAE_P_MAX \
             "data.frame_dirs=[$FRAME_DIRS]" \
             trainer.devices=$DEVICES \
-            trainer.max_steps=$CUR_STEPS_1A \
+            trainer.max_steps=$CUR_STEPS \
             data.batch_size_tokenizer=$BATCH_TOK \
             data.num_workers=$NUM_WORKERS \
+            checkpoint.dirpath=$TOK_CKPT_DIR \
             wandb.name="c${CYCLE}_tok_${RUN_TAG}" \
-            "${RESUME_TOK_ARG[@]}" \
-            "${DATA_TASKS_ARG[@]}"
+            "data.tasks=[$TASKS]" \
+            "${RESUME_ARG[@]}"
     fi
 
-    # ── Phase 1b — Dynamics (todos los ciclos) ──────────────────────────────
+    # Phase 1b — Dynamics
     echo "[Phase 1b] Entrenando dynamics..."
-    RESUME_DYN_ARG=()
-    if [[ "$CYCLE" -eq 0 ]] && [[ -f "$DYN_CKPT" ]]; then
-        echo "[Phase 1b] Checkpoint existente en ciclo 0 — saltando (usar ciclos>0 para warm)."
-    else
-        if [[ "$CYCLE" -gt 0 ]] && [[ -f "$DYN_CKPT" ]]; then
-            RESUME_DYN_ARG=("resume=$DYN_CKPT")
-            CUR_STEPS_1B=$STEPS_1B
-        else
-            CUR_STEPS_1B=$COLD_1B
-        fi
-        python scripts/pipeline/train_phase1b_dynamics.py \
-            dynamics.tokenizer_ckpt=$TOK_CKPT \
-            "data.data_dirs=[$DATA_DIRS]" \
-            "data.frame_dirs=[$FRAME_DIRS]" \
-            trainer.devices=$DEVICES \
-            trainer.max_steps=$CUR_STEPS_1B \
-            data.batch_size_dynamics=$BATCH_DYN \
-            data.num_workers=$NUM_WORKERS \
-            wandb.name="c${CYCLE}_dyn_${RUN_TAG}" \
-            "${RESUME_DYN_ARG[@]}" \
-            "${DATA_TASKS_ARG[@]}"
-    fi
+    phase_steps $COLD_1B $STEPS_1B "$DYN_CKPT" $CYCLE
+    python scripts/pipeline/train_phase1b_dynamics.py \
+        dynamics=$CFG_SUFFIX \
+        dynamics.tokenizer_ckpt=$TOK_CKPT \
+        "data.data_dirs=[$DATA_DIRS]" \
+        "data.frame_dirs=[$FRAME_DIRS]" \
+        data.img_size=$IMG_SIZE \
+        trainer.devices=$DEVICES \
+        trainer.max_steps=$CUR_STEPS \
+        data.batch_size_dynamics=$BATCH_DYN \
+        data.num_workers=$NUM_WORKERS \
+        checkpoint.dirpath=$DYN_CKPT_DIR \
+        wandb.name="c${CYCLE}_dyn_${RUN_TAG}" \
+        "data.tasks=[$TASKS]" \
+        "${RESUME_ARG[@]}"
 
-    # ── Phase 2 — Finetuning ────────────────────────────────────────────────
+    # Phase 2 — Finetuning
     echo "[Phase 2] Finetuning (BC + reward)..."
-    CUR_STEPS_2=$([[ "$CYCLE" -eq 0 ]] && echo $COLD_2 || echo $STEPS_2)
+    phase_steps $COLD_2 $STEPS_2 "$FT_CKPT" $CYCLE
     python scripts/pipeline/train_phase2_finetuning.py \
+        finetune=$CFG_SUFFIX \
         finetune.tokenizer_ckpt=$TOK_CKPT \
         finetune.dynamics_ckpt=$DYN_CKPT \
         "data.data_dirs=[$DATA_DIRS]" \
         "data.frame_dirs=[$FRAME_DIRS]" \
+        data.img_size=$IMG_SIZE \
         trainer.devices=$DEVICES \
-        trainer.max_steps=$CUR_STEPS_2 \
-        data.batch_size_dynamics=$BATCH_DYN \
+        trainer.max_steps=$CUR_STEPS \
+        data.batch_size_dynamics=$BATCH_FT \
         data.num_workers=$NUM_WORKERS \
+        checkpoint.dirpath=$FT_CKPT_DIR \
         wandb.name="c${CYCLE}_ft_${RUN_TAG}" \
-        "${DATA_TASKS_ARG[@]}"
+        "data.tasks=[$TASKS]" \
+        "${RESUME_ARG[@]}"
 
-    # ── Phase 3 — Imagination Training ─────────────────────────────────────
+    # Phase 3 — Imagination (PMPO)
     echo "[Phase 3] Imagination training (PMPO)..."
-    CUR_STEPS_3=$([[ "$CYCLE" -eq 0 ]] && echo $COLD_3 || echo $STEPS_3)
+    phase_steps $COLD_3 $STEPS_3 "$AGENT_CKPT" $CYCLE
     python scripts/pipeline/train_phase3_imagination.py \
+        agent=$CFG_SUFFIX \
         agent.finetune_ckpt=$FT_CKPT \
         "data.data_dirs=[$DATA_DIRS]" \
         "data.frame_dirs=[$FRAME_DIRS]" \
+        data.img_size=$IMG_SIZE \
         trainer.devices=$DEVICES \
-        trainer.max_steps=$CUR_STEPS_3 \
-        data.batch_size_dynamics=$BATCH_DYN \
+        trainer.strategy=$AGENT_DDP_STRATEGY \
+        trainer.max_steps=$CUR_STEPS \
+        data.batch_size_dynamics=$IMAG_BATCH \
         data.num_workers=$NUM_WORKERS \
         agent.imagination_batch_size=$IMAG_BATCH \
+        checkpoint.dirpath=$AGENT_CKPT_DIR \
         wandb.name="c${CYCLE}_agent_${RUN_TAG}" \
-        "${DATA_TASKS_ARG[@]}"
+        "data.tasks=[$TASKS]" \
+        "${RESUME_ARG[@]}"
 
-    # ── Guardar checkpoint del ciclo ────────────────────────────────────────
-    cp $AGENT_CKPT ./logs/agent_ckpts/cycle${CYCLE}.ckpt
+    [[ -f "$AGENT_CKPT" ]] && cp "$AGENT_CKPT" "$AGENT_CYCLE_CKPT_DIR/cycle${CYCLE}.ckpt"
     echo ""
-    echo "✓ Ciclo $CYCLE completo → ./logs/agent_ckpts/cycle${CYCLE}.ckpt"
+    if [[ -f "$AGENT_CYCLE_CKPT_DIR/cycle${CYCLE}.ckpt" ]]; then
+        echo "✓ Ciclo $CYCLE completo → $AGENT_CYCLE_CKPT_DIR/cycle${CYCLE}.ckpt"
+    else
+        echo "✓ Ciclo $CYCLE completado (sin snapshot de agent)"
+    fi
 done
 
-echo ""
-echo "════════════════════════════════════════"
-echo " Pipeline completo — $K ciclos OK"
-echo "════════════════════════════════════════"
+run_eval "$AGENT_CKPT" "$RUN_DATA_ROOT" "$IMG_SIZE" "$RUN_TAG" "$COLLECT_NUM_ENVS" "$TASKS"
 
+echo ""; echo "════════════════════════════════════════"
+echo " Pipeline ${RES}x${RES} completo — $K ciclos OK"
+echo "════════════════════════════════════════"

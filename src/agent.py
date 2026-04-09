@@ -250,6 +250,9 @@ class ValueHead(nn.Module):
         self.num_bins = int(num_bins)
         self.trunk    = _Trunk(state_dim, hidden_dim)
         self.head     = nn.Linear(hidden_dim, num_bins)
+        # Near-zero init: softmax ≈ uniform → expected value ≈ 0 at start
+        nn.init.zeros_(self.head.bias)
+        nn.init.normal_(self.head.weight, std=0.01)
         self.register_buffer("bins", make_twohot_bins(), persistent=False)
 
     def forward(self, h_flat: torch.Tensor) -> torch.Tensor:
