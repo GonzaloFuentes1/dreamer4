@@ -144,7 +144,6 @@ def main(cfg: DictConfig):
     episode_len = int(dc.get("episode_len", 1000))
     frame_skip = int(dc.get("frame_skip", 1))
     color_randomization = bool(dc.get("color_randomization", False))
-    shard_size = dc.get("shard_size", 2048)
     target_img_size = dc.get("img_size", 128)
     target_action_dim = int(dc.get("action_dim", 16))
     min_frames_per_task = int(dc.get("min_frames_per_task", episodes_target * episode_len))
@@ -153,10 +152,9 @@ def main(cfg: DictConfig):
     max_collect_frames_per_task = int(
         dc.get(
             "max_collect_frames_per_task",
-            max(episodes_target * episode_len * num_envs, max(min_frames_per_task * 4, shard_size)),
+            max(episodes_target * episode_len * num_envs, min_frames_per_task * 4),
         )
     )
-    max_collect_frames_per_task = max(max_collect_frames_per_task, shard_size)
     
     for task in tasks:
         print(f"\n{'='*60}")
