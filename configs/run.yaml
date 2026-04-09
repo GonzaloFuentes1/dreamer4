@@ -29,7 +29,11 @@ model:
 
 # ── Datos ─────────────────────────────────────────────────────────────────────
 data:
-  base_root: "./data/pretrained-64x64"
+  # Directorios con archivos .h5 para el ciclo 0.
+  data_dirs:
+    - "./data/pretrained-64x64"
+
+  # Tasks a entrenar. null = todos los encontrados en data_dirs.
   tasks:
     - walker-walk
     - walker-run

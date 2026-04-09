@@ -97,7 +97,7 @@ for CYCLE in $(seq 0 $((K - 1))); do
             ++collect.preview_video_max_frames=$COLLECT_PREVIEW_VIDEO_MAX_FRAMES \
             "collect.tasks=[$TASKS]"
     fi
-    append_dirs "$OUT_DATA" "$OUT_FRAMES"
+    append_dirs "$OUT_DATA"
 
     # Phase 1a — Tokenizer (skip en ciclo 0 si ya existe checkpoint)
     if [[ "$CYCLE" -eq 0 && -f "$TOK_CKPT" ]]; then
@@ -107,7 +107,7 @@ for CYCLE in $(seq 0 $((K - 1))); do
         phase_steps $COLD_1A $STEPS_1A "$TOK_CKPT" $CYCLE
         python scripts/pipeline/train_phase1a_tokenizer.py \
             tokenizer=$CFG_SUFFIX \
-            "data.frame_dirs=[$FRAME_DIRS]" \
+            "data.data_dirs=[$DATA_DIRS]" \
             data.img_size=$IMG_SIZE \
             trainer.devices=$DEVICES \
             trainer.max_steps=$CUR_STEPS \
@@ -129,7 +129,6 @@ for CYCLE in $(seq 0 $((K - 1))); do
             dynamics=$CFG_SUFFIX \
             dynamics.tokenizer_ckpt=$TOK_CKPT \
             "data.data_dirs=[$DATA_DIRS]" \
-            "data.frame_dirs=[$FRAME_DIRS]" \
             data.img_size=$IMG_SIZE \
             trainer.devices=$DEVICES \
             trainer.max_steps=$CUR_STEPS \
@@ -152,7 +151,6 @@ for CYCLE in $(seq 0 $((K - 1))); do
             finetune.tokenizer_ckpt=$TOK_CKPT \
             finetune.dynamics_ckpt=$DYN_CKPT \
             "data.data_dirs=[$DATA_DIRS]" \
-            "data.frame_dirs=[$FRAME_DIRS]" \
             data.img_size=$IMG_SIZE \
             trainer.devices=$DEVICES \
             trainer.max_steps=$CUR_STEPS \
@@ -174,7 +172,6 @@ for CYCLE in $(seq 0 $((K - 1))); do
             agent=$CFG_SUFFIX \
             agent.finetune_ckpt=$FT_CKPT \
             "data.data_dirs=[$DATA_DIRS]" \
-            "data.frame_dirs=[$FRAME_DIRS]" \
             data.img_size=$IMG_SIZE \
             trainer.devices=$DEVICES \
             trainer.max_steps=$CUR_STEPS \

@@ -222,12 +222,12 @@ def main(cfg: DictConfig) -> None:
                 else:  n_skip += 1
 
     print(f"\n[download] Done. downloaded={n_ok}  skipped={n_skip}")
-    print(f"\nNext — train con pretrain data:")
-    print(f"  python scripts/pipeline/train_phase1a_tokenizer.py \\")
-    print(f'    "data.frame_dirs=[{dc.out_frames_dir}]"')
-    print(f"  python scripts/pipeline/train_phase1b_dynamics.py \\")
-    print(f'    "data.data_dirs=[{dc.out_data_dir}]" \\')
-    print(f'    "data.frame_dirs=[{dc.out_frames_dir}]"')
+    print(f"\nNext — convierte .pt → .h5 y luego entrena:")
+    print(f"  python scripts/convert_pt_to_hdf5.py \\")
+    print(f"    --data {dc.out_data_dir} --frames {dc.out_frames_dir} \\")
+    print(f"    --out {dc.out_data_dir}")
+    print(f"\nLuego:")
+    print(f"  python scripts/run.py \"data.data_dirs=[{dc.out_data_dir}]\"")
 
 
 if __name__ == "__main__":

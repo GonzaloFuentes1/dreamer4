@@ -131,19 +131,12 @@ def main(cfg: DictConfig):
         )
     
     out_demo = Path(dc.get("out_data_dir", "./data/collected/demos"))
-    out_frames = Path(dc.get("out_frames_dir", "./data/collected/frames"))
-    
     out_demo.mkdir(parents=True, exist_ok=True)
-    out_frames.mkdir(parents=True, exist_ok=True)
 
-    use_hdf5 = bool(dc.get("use_hdf5", HDF5_AVAILABLE))
-    if use_hdf5 and not HDF5_AVAILABLE:
-        print("[Phase 0] WARN: use_hdf5=true pero h5py no instalado. Usando .pt.")
-        use_hdf5 = False
-    
-    print(f"\n[Phase 0] Iniciando Recolección Múltiple. Destinos:")
-    print(f"  - Demos:  {out_demo}")
-    print(f"  - Frames: {out_frames}\n")
+    if not HDF5_AVAILABLE:
+        raise RuntimeError("[Phase 0] h5py no disponible. Instala: pip install h5py")
+
+    print(f"\n[Phase 0] Iniciando Recolección Múltiple. Destino: {out_demo}\n")
     
     tasks = dc.get("tasks", ["atari_pong"])
     num_envs = dc.get("num_envs_per_task", 16)
@@ -195,24 +188,18 @@ def main(cfg: DictConfig):
         )
         
         # Estructuras de almacenamiento
-        buffer_frames = []
-
-        # HDF5 writer (si está habilitado)
-        hdf5_writer = None
-        if use_hdf5:
-            hdf5_path = out_demo / f"{task}.h5"
-            hdf5_writer = HDF5EpisodeWriter(
-                hdf5_path,
-                img_size=target_img_size,
-                action_dim=target_action_dim,
-                chunk_frames=512,
-            )
-            print(f"[Phase 0] HDF5 writer: {hdf5_path}")
+        hdf5_path = out_demo / f"{task}.h5"
+        hdf5_writer = HDF5EpisodeWriter(
+            hdf5_path,
+            img_size=target_img_size,
+            action_dim=target_action_dim,
+            chunk_frames=512,
+        )
+        print(f"[Phase 0] HDF5 writer: {hdf5_path}")
         all_actions = []
         all_rewards = []
         all_episodes = []
         
-        shard_idx = 0
         episodes_collected = 0
         steps_collected = 0
         current_episode_ids = torch.arange(num_envs) # trackers de id
@@ -242,8 +229,6 @@ def main(cfg: DictConfig):
 
             # Extraer píxeles
             frames = _extract_frames(tensordict, target_size=target_img_size) # (B*T, 3, 128, 128)
-            buffer_frames.append(frames)
-            
             # --- VIDEO CAPTURE ---
             # Capturamos un episodio completo del env seleccionado (frame a frame),
             # no solo 1 frame por batch, para evitar videos en "camara rapida".
@@ -315,25 +300,6 @@ def main(cfg: DictConfig):
             if hdf5_writer is not None:
                 hdf5_writer.append_batch(frames, acts, rews, ep_id_t)
             
-            # Flush a Disco (Sharding compatible con sharded_frame_dataset.py)
-            current_buffer_size = sum([f.shape[0] for f in buffer_frames])
-            if current_buffer_size >= shard_size:
-                concat_f = torch.cat(buffer_frames, dim=0)
-                
-                # Escribir fragmentos enteros de tamaño shard_size
-                while concat_f.shape[0] >= shard_size:
-                    to_save = concat_f[:shard_size]
-                    concat_f = concat_f[shard_size:]
-                    
-                    task_frame_dir = out_frames / task
-                    task_frame_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    out_path = task_frame_dir / f"{task}_shard{shard_idx:04d}.pt"
-                    torch.save({"frames": to_save}, out_path)
-                    shard_idx += 1
-                
-                buffer_frames = [concat_f] if concat_f.shape[0] > 0 else []
-                
             # Condición de salida si acumulamos los episodios target
             if episodes_collected >= episodes_target and steps_collected >= min_frames_per_task:
                 print(
@@ -351,14 +317,6 @@ def main(cfg: DictConfig):
                     f"{steps_collected}/{min_frames_per_task}. Continuando recoleccion..."
                 )
                 
-        # Limpieza residual
-        if len(buffer_frames) > 0 and buffer_frames[0].shape[0] > 0:
-            concat_f = torch.cat(buffer_frames, dim=0)
-            task_frame_dir = out_frames / task
-            task_frame_dir.mkdir(parents=True, exist_ok=True)
-            out_path = task_frame_dir / f"{task}_shard{shard_idx:04d}.pt"
-            torch.save({"frames": concat_f}, out_path)
-            shard_idx += 1
         # --- GUARDADO DE VIDEO ---
         if save_video and len(video_frames_list) > 0:
             vid_path = out_videos / f"{task}_preview.mp4"
@@ -377,15 +335,9 @@ def main(cfg: DictConfig):
         }
         
         # Recorte al tamaño real de frames extraídos para que calce 1:1 localmente con el sharded loader.
-        if hdf5_writer is not None:
-            total_steps_saved = hdf5_writer.n_steps
-            hdf5_writer.finalize()
-            hdf5_writer = None
-        else:
-            total_steps_saved = sum([
-                torch.load(p, weights_only=False)["frames"].shape[0]
-                for p in sorted((out_frames / task).glob("*.pt"))
-            ])
+        total_steps_saved = hdf5_writer.n_steps
+        hdf5_writer.finalize()
+        hdf5_writer = None
         demo_data = {k: v[:total_steps_saved] for k, v in demo_data.items()}
         avg_ep_len = float(total_steps_saved) / float(max(episodes_collected, 1))
 
@@ -405,12 +357,8 @@ def main(cfg: DictConfig):
                 f"Aumenta max_collect_frames_per_task o reduce min_frames_per_task."
             )
             
-        task_demo_path = out_demo / f"{task}.pt"
-        torch.save(demo_data, task_demo_path)
-        
         elapsed = time.time() - start_time
-        print(f"[Done] '{task}': Guardados {total_steps_saved} frames/steps. "
-              f"Data en {task_demo_path} ({elapsed:.1f}s generacion)")
+        print(f"[Done] '{task}': Guardados {total_steps_saved} frames/steps en {hdf5_path} ({elapsed:.1f}s)")
         print(f"       Episodios: {episodes_collected} | Largo promedio: {avg_ep_len:.1f} steps")
         
         # Opcional metadatos (Gobernanza Etapa 1)

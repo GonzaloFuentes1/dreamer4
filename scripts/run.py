@@ -12,7 +12,7 @@
 #   python scripts/run.py
 #   python scripts/run.py run.tag=experimento1 run.cycles=5
 #   python scripts/run.py model.tokenizer=discrete_base_64x64 run.res=64
-#   python scripts/run.py data.base_root=./data/pretrained-64x64 run.tag=pt_active
+#   python scripts/run.py "data.data_dirs=[./data/pretrained-64x64]" run.tag=pt_active
 #
 # En SLURM (single-node, multi-GPU):
 #   srun --nodes=1 --ntasks=1 --gpus=2 --cpus-per-task=64 --mem=128G --time=24:00:00 \\
@@ -158,9 +158,9 @@ def header(title: str, cycle: int, total: int) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def phase_collect(cfg: DictConfig, cycle: int, run_root: Path,
-                  agent_ckpt: Path, data_root: Path) -> tuple[Path, Path]:
-    out_data   = data_root / f"cycle{cycle}" / "demos"
-    out_frames = data_root / f"cycle{cycle}" / "frames"
+                  agent_ckpt: Path, data_root: Path) -> Path:
+    """Ejecuta Phase 0: colecta episodios y escribe <task>.h5 en out_data."""
+    out_data   = data_root / f"cycle{cycle}"
     out_videos = data_root / f"cycle{cycle}" / "videos"
     header("Phase 0 · Collect", cycle, cfg.run.cycles)
     run([
@@ -173,7 +173,6 @@ def phase_collect(cfg: DictConfig, cycle: int, run_root: Path,
         f"collect.frame_skip={cfg.collect.frame_skip}",
         f"collect.img_size={cfg.run.res}",
         f"collect.out_data_dir={out_data}",
-        f"collect.out_frames_dir={out_frames}",
         f"collect.out_videos_dir={out_videos}",
         f"++collect.save_preview_video={str(cfg.collect.save_video).lower()}",
         "++collect.preview_video_backend=torchrl",
@@ -181,11 +180,11 @@ def phase_collect(cfg: DictConfig, cycle: int, run_root: Path,
         f"++collect.preview_video_max_frames={cfg.collect.episode_len}",
         f"collect.tasks=[{tasks_str(cfg.data.tasks)}]",
     ])
-    return out_data, out_frames
+    return out_data
 
 
 def phase_tokenizer(cfg: DictConfig, cycle: int, run_root: Path,
-                    frame_dirs: list[str], devices: int) -> Path:
+                    data_dirs: list[str], devices: int) -> Path:
     ckpt_dir = run_root / "tokenizer"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     last_ckpt = ckpt_dir / "last.ckpt"
@@ -200,7 +199,7 @@ def phase_tokenizer(cfg: DictConfig, cycle: int, run_root: Path,
     run([
         sys.executable, "scripts/pipeline/train_phase1a_tokenizer.py",
         f"tokenizer={cfg.model.tokenizer}",
-        f"data.frame_dirs={join_dirs(frame_dirs)}",
+        f"data.data_dirs={join_dirs(data_dirs)}",
         f"data.img_size={cfg.run.res}",
         f"trainer.devices={devices}",
         f"trainer.max_steps={cur_steps}",
@@ -219,7 +218,7 @@ def phase_tokenizer(cfg: DictConfig, cycle: int, run_root: Path,
 
 
 def phase_dynamics(cfg: DictConfig, cycle: int, run_root: Path,
-                   data_dirs: list[str], frame_dirs: list[str],
+                   data_dirs: list[str],
                    tok_ckpt: Path, devices: int) -> Path:
     ckpt_dir = run_root / "dynamics"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -237,7 +236,6 @@ def phase_dynamics(cfg: DictConfig, cycle: int, run_root: Path,
         f"dynamics={cfg.model.dynamics}",
         f"dynamics.tokenizer_ckpt={tok_ckpt}",
         f"data.data_dirs={join_dirs(data_dirs)}",
-        f"data.frame_dirs={join_dirs(frame_dirs)}",
         f"data.img_size={cfg.run.res}",
         f"trainer.devices={devices}",
         f"trainer.max_steps={cur_steps}",
@@ -256,7 +254,7 @@ def phase_dynamics(cfg: DictConfig, cycle: int, run_root: Path,
 
 
 def phase_finetune(cfg: DictConfig, cycle: int, run_root: Path,
-                   data_dirs: list[str], frame_dirs: list[str],
+                   data_dirs: list[str],
                    tok_ckpt: Path, dyn_ckpt: Path, devices: int) -> Path:
     ckpt_dir = run_root / "finetune"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -275,7 +273,6 @@ def phase_finetune(cfg: DictConfig, cycle: int, run_root: Path,
         f"finetune.tokenizer_ckpt={tok_ckpt}",
         f"finetune.dynamics_ckpt={dyn_ckpt}",
         f"data.data_dirs={join_dirs(data_dirs)}",
-        f"data.frame_dirs={join_dirs(frame_dirs)}",
         f"data.img_size={cfg.run.res}",
         f"trainer.devices={devices}",
         f"trainer.max_steps={cur_steps}",
@@ -294,7 +291,7 @@ def phase_finetune(cfg: DictConfig, cycle: int, run_root: Path,
 
 
 def phase_agent(cfg: DictConfig, cycle: int, run_root: Path,
-                data_dirs: list[str], frame_dirs: list[str],
+                data_dirs: list[str],
                 ft_ckpt: Path, devices: int) -> Path:
     ckpt_dir = run_root / "agent"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -312,7 +309,6 @@ def phase_agent(cfg: DictConfig, cycle: int, run_root: Path,
         f"agent={cfg.model.agent}",
         f"agent.finetune_ckpt={ft_ckpt}",
         f"data.data_dirs={join_dirs(data_dirs)}",
-        f"data.frame_dirs={join_dirs(frame_dirs)}",
         f"data.img_size={cfg.run.res}",
         f"trainer.devices={devices}",
         f"trainer.max_steps={cur_steps}",
@@ -393,23 +389,24 @@ def main() -> None:
     for d in (run_root, data_root, cycles_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    base_data = Path(cfg.data.base_root)
-    if not base_data.exists():
-        raise FileNotFoundError(
-            f"data.base_root no existe: {base_data}\n"
-            "Descargá los datos con: python scripts/download_pretrain_data.py"
-        )
+    base_dirs = [Path(d) for d in cfg.data.data_dirs]
+    for d in base_dirs:
+        if not d.exists():
+            raise FileNotFoundError(
+                f"data.data_dirs: directorio no encontrado: {d}\n"
+                "Descargá los datos con: python scripts/download_pretrain_data.py\n"
+                "O convertí datos legacy con: python scripts/convert_pt_to_hdf5.py --data <dir>"
+            )
 
     bar = "═" * 44
     print(f"\n{bar}")
     print(f"  Dreamer 4 — run={cfg.run.tag}  cycles={cfg.run.cycles}")
     print(f"  tokenizer={cfg.model.tokenizer}  dynamics={cfg.model.dynamics}")
     print(f"  devices={devices}  res={cfg.run.res}  seed={cfg.run.seed}")
-    print(f"  base_data={base_data}")
+    print(f"  data={[str(d) for d in base_dirs]}")
     print(f"{bar}\n", flush=True)
 
-    data_dirs: list[str] = []
-    frame_dirs: list[str] = []
+    data_dirs: list[str] = [str(d) for d in base_dirs]
     agent_ckpt = run_root / "agent" / "last.ckpt"
 
     for cycle in range(cfg.run.cycles):
@@ -417,21 +414,15 @@ def main() -> None:
 
         # Phase 0 — datos
         if cycle == 0:
-            out_data   = base_data / "demos"
-            out_frames = base_data / "frames"
-            print(f"[Phase 0] Datos fijos: {base_data}")
+            print(f"[Phase 0] Datos fijos: {data_dirs}")
         else:
-            out_data, out_frames = phase_collect(
-                cfg, cycle, run_root, agent_ckpt, data_root
-            )
+            out_data = phase_collect(cfg, cycle, run_root, agent_ckpt, data_root)
+            data_dirs.append(str(out_data))
 
-        data_dirs.append(str(out_data))
-        frame_dirs.append(str(out_frames))
-
-        tok_ckpt = phase_tokenizer(cfg, cycle, run_root, frame_dirs, devices)
-        dyn_ckpt = phase_dynamics(cfg, cycle, run_root, data_dirs, frame_dirs, tok_ckpt, devices)
-        ft_ckpt  = phase_finetune(cfg, cycle, run_root, data_dirs, frame_dirs, tok_ckpt, dyn_ckpt, devices)
-        agent_ckpt = phase_agent(cfg, cycle, run_root, data_dirs, frame_dirs, ft_ckpt, devices)
+        tok_ckpt = phase_tokenizer(cfg, cycle, run_root, data_dirs, devices)
+        dyn_ckpt = phase_dynamics(cfg, cycle, run_root, data_dirs, tok_ckpt, devices)
+        ft_ckpt  = phase_finetune(cfg, cycle, run_root, data_dirs, tok_ckpt, dyn_ckpt, devices)
+        agent_ckpt = phase_agent(cfg, cycle, run_root, data_dirs, ft_ckpt, devices)
 
         if agent_ckpt.exists():
             snap = cycles_dir / f"cycle{cycle}.ckpt"

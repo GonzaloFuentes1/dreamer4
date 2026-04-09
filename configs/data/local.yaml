@@ -1,48 +1,37 @@
 # configs/data/local.yaml
 # Data paths for local development. Override with your actual paths.
+#
+# Opciones (elige una):
+#   data_root: /ruta/al/dir          → auto-descubre ciclos con .h5 adentro
+#   data_dirs: [dir1, dir2, ...]     → lista explícita de dirs con archivos .h5
+#
+# Los archivos .h5 se generan con:
+#   python scripts/pipeline/train_phase0_collect_episodes.py  (colección)
+#   python scripts/convert_pt_to_hdf5.py --data <dir>         (conversión legacy)
 
-# Frame shards (preprocessed by preprocess_dataset.py) — used by tokenizer training
-# Alternativa a frame_dirs/data_dirs: apunta a un directorio raíz y se
-# descubren automáticamente todos los ciclos (subdirectorios con .h5 o .pt).
-# Si se define data_root, frame_dirs y data_dirs son ignorados.
-# Ejemplo: data_root: /workspace1/gofuentes/dreamer4/data
 data_root: null
 
-frame_dirs:
-  - /data/expert-shards
-  - /data/mixed-small-shards
-  - /data/mixed-large-shards
-
-# Raw demo data (actions + rewards) — used by dynamics training
 data_dirs:
-  - /data/expert
-  - /data/mixed-small
-  - /data/mixed-large
+  - /workspace1/gofuentes/dreamer4/data/pretrained-64x64
 
-# Task metadata JSON
 tasks_json: ${hydra:runtime.cwd}/tasks.json
 
-# Filtro de tasks (null = todos los encontrados en data_dirs)
+# Filtro de tasks (null = todas las encontradas en data_dirs)
 tasks: null
-# Si strict_tasks=true, falla si algún task del filtro no tiene datos
-strict_tasks: false
 
-# Tokenizer training
 seq_len_tokenizer: 8
 batch_size_tokenizer: 8
 
-# Dynamics training
 seq_len_dynamics: 32
 batch_size_dynamics: 24
 
-# Image resolution (must match collected frames — pre-convert with scripts/convert_frames_to_res.py)
 img_size: 64
 
-# Frame skip used during data collection (HF pretrain data: frame_skip=2)
+# Frame skip usado durante la colección
 frame_skip: 2
 
-# Shared
+# Workers de DataLoader
 num_workers: 8
 
-# Visual domain randomization (randomiza colores de geoms en cada reset)
+# Visual domain randomization en colección (randomiza colores de MuJoCo en reset)
 color_randomization: false

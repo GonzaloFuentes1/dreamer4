@@ -34,15 +34,14 @@ detect_devices() {
 }
 
 # ── Acumular directorios de datos a lo largo de los ciclos ────────────────────
-# Uso: append_dirs "$OUT_DATA" "$OUT_FRAMES"
-# Modifica globales: DATA_DIRS, FRAME_DIRS
+# Uso: append_dirs "$OUT_DATA"
+# Modifica global: DATA_DIRS
 DATA_DIRS=""
-FRAME_DIRS=""
 append_dirs() {
     if [[ -z "$DATA_DIRS" ]]; then
-        DATA_DIRS="$1"; FRAME_DIRS="$2"
+        DATA_DIRS="$1"
     else
-        DATA_DIRS="${DATA_DIRS},$1"; FRAME_DIRS="${FRAME_DIRS},$2"
+        DATA_DIRS="${DATA_DIRS},$1"
     fi
 }
 

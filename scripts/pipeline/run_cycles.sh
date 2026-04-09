@@ -153,7 +153,7 @@ for CYCLE in $(seq 0 $((K - 1))); do
         [[ "$CYCLE" -gt 0 ]] && COLLECT_ARGS+=(collect.agent_ckpt=$AGENT_CKPT)
         python scripts/pipeline/launch_phase0_dist.py "${COLLECT_ARGS[@]}"
     fi
-    append_dirs "$OUT_DATA" "$OUT_FRAMES"
+    append_dirs "$OUT_DATA"
 
     # Phase 1a — Tokenizer
     if [[ "$CYCLE" -eq 0 && "$START_FROM_DYNAMICS_CYCLE0" == "true" ]]; then
@@ -172,7 +172,7 @@ for CYCLE in $(seq 0 $((K - 1))); do
             tokenizer.latents_only_time=$TOKENIZER_LATENTS_ONLY_TIME \
             tokenizer.scale_pos_embeds=$TOKENIZER_SCALE_POS_EMBEDS \
             tokenizer.mae_p_max=$TOKENIZER_MAE_P_MAX \
-            "data.frame_dirs=[$FRAME_DIRS]" \
+            "data.data_dirs=[$DATA_DIRS]" \
             trainer.devices=$DEVICES \
             trainer.max_steps=$CUR_STEPS \
             data.batch_size_tokenizer=$BATCH_TOK \
@@ -190,7 +190,6 @@ for CYCLE in $(seq 0 $((K - 1))); do
         dynamics=$CFG_SUFFIX \
         dynamics.tokenizer_ckpt=$TOK_CKPT \
         "data.data_dirs=[$DATA_DIRS]" \
-        "data.frame_dirs=[$FRAME_DIRS]" \
         data.img_size=$IMG_SIZE \
         trainer.devices=$DEVICES \
         trainer.max_steps=$CUR_STEPS \
@@ -209,7 +208,6 @@ for CYCLE in $(seq 0 $((K - 1))); do
         finetune.tokenizer_ckpt=$TOK_CKPT \
         finetune.dynamics_ckpt=$DYN_CKPT \
         "data.data_dirs=[$DATA_DIRS]" \
-        "data.frame_dirs=[$FRAME_DIRS]" \
         data.img_size=$IMG_SIZE \
         trainer.devices=$DEVICES \
         trainer.max_steps=$CUR_STEPS \
@@ -227,7 +225,6 @@ for CYCLE in $(seq 0 $((K - 1))); do
         agent=$CFG_SUFFIX \
         agent.finetune_ckpt=$FT_CKPT \
         "data.data_dirs=[$DATA_DIRS]" \
-        "data.frame_dirs=[$FRAME_DIRS]" \
         data.img_size=$IMG_SIZE \
         trainer.devices=$DEVICES \
         trainer.strategy=$AGENT_DDP_STRATEGY \
