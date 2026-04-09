@@ -9,10 +9,16 @@
 #   - Calcula steps con esquema cold/warm por ciclo
 #
 # Uso:
-#   python scripts/run.py
+#   python scripts/run.py                              # config por defecto
+#   python scripts/run.py profile=smoke_test           # smoke test (2 ciclos, steps mínimos)
+#   python scripts/run.py profile=smoke_test run.tag=mi_test
 #   python scripts/run.py run.tag=experimento1 run.cycles=5
 #   python scripts/run.py model.tokenizer=discrete_base_64x64 run.res=64
-#   python scripts/run.py "data.data_dirs=[./data/pretrained-64x64]" run.tag=pt_active
+#
+# Perfiles disponibles (configs/profiles/):
+#   smoke_test   — 1 task, 2 ciclos, steps mínimos para verificar el pipeline
+#
+# Los overrides CLI se aplican DESPUÉS del perfil, por lo que tienen prioridad.
 #
 # En SLURM (single-node, multi-GPU):
 #   srun --nodes=1 --ntasks=1 --gpus=2 --cpus-per-task=64 --mem=128G --time=24:00:00 \\
@@ -367,7 +373,22 @@ def main() -> None:
     cfg = OmegaConf.load(REPO_ROOT / "configs" / "run.yaml")
 
     # Aplicar overrides CLI estilo key=value (soporta listas: key=[a,b,c])
-    for arg in sys.argv[1:]:
+    # Soporte de perfiles: profile=<nombre> carga configs/profiles/<nombre>.yaml
+    # y lo fusiona sobre la config base antes de procesar el resto de overrides.
+    args = sys.argv[1:]
+    profile_args = [a for a in args if a.startswith("profile=")]
+    other_args   = [a for a in args if not a.startswith("profile=")]
+
+    for pa in profile_args:
+        profile_name = pa.split("=", 1)[1]
+        profile_path = REPO_ROOT / "configs" / "profiles" / f"{profile_name}.yaml"
+        if not profile_path.exists():
+            raise FileNotFoundError(f"Perfil no encontrado: {profile_path}")
+        profile_cfg = OmegaConf.load(profile_path)
+        cfg = OmegaConf.merge(cfg, profile_cfg)
+        print(f"[run.py] Perfil cargado: {profile_path}")
+
+    for arg in other_args:
         if "=" in arg:
             key, val = arg.split("=", 1)
             try:

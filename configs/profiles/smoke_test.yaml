@@ -1,0 +1,53 @@
+# configs/profiles/smoke_test.yaml
+# Perfil de smoke test: verifica que el pipeline completo funcione sin errores.
+# Usa 1 task, pasos mínimos por fase y 2 ciclos (frío + 1 self-play).
+#
+# Uso:
+#   python scripts/run.py profile=smoke_test
+#   python scripts/run.py profile=smoke_test run.tag=mi_smoke
+
+run:
+  tag: "smoke_test"
+  cycles: 2
+  res: 64
+  seed: 42
+
+data:
+  data_dirs:
+    - "./data/pretrained-64x64"
+  tasks:
+    - walker-walk
+  num_workers: 2
+
+steps:
+  tokenizer_cold: 500
+  tokenizer_warm: 100
+  dynamics_cold: 500
+  dynamics_warm: 100
+  finetune_cold: 200
+  finetune_warm: 50
+  agent_cold: 300
+  agent_warm: 100
+
+batch:
+  tokenizer: 8
+  dynamics: 16
+  finetune: 16
+  agent: 16
+
+checkpoint:
+  every_tokenizer: 200
+  every_dynamics: 200
+  every_finetune: 100
+  every_agent: 150
+  save_top_k: 1
+
+trainer:
+  log_every_n_steps: 25
+
+collect:
+  n_episodes_per_task: 2
+  episode_len: 100
+  frame_skip: 2
+  num_envs: 2
+  save_video: false
