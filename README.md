@@ -1,266 +1,215 @@
 # dreamer4 — PyTorch Lightning
 
-Implementación del pipeline completo de [Training Agents Inside of Scalable World Models](https://arxiv.org/abs/2509.24527) (Hafner, Yan, Lillicrap, 2025) sobre DMControl, usando PyTorch Lightning + Hydra.
+> ⚠️ **Implementación no oficial.** Este repositorio es una re-implementación independiente basada en el paper
+> [Training Agents Inside of Scalable World Models](https://arxiv.org/abs/2509.24527) (Hafner, Yan, Lillicrap, 2025).
+> El repositorio oficial de los autores es [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4).
 
-Basado en la implementación de referencia [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4), con las Fases 2 y 3 (agent finetuning + imagination training) y el ciclo de recolección recursivo añadidos.
+Implementación del pipeline completo de Dreamer V4 sobre DMControl, usando PyTorch Lightning + Hydra.
+Extiende la referencia oficial con las Fases 2 y 3 (agent finetuning + imagination training),
+el ciclo de recolección recursivo (self-play) y soporte para tokenizador discreto.
 
 ---
 
 ## Instalación
 
 ```bash
-conda env create -f environment.yaml
-conda activate dreamer4
+# Requiere uv (https://github.com/astral-sh/uv)
+uv venv .venv --python 3.10
+source .venv/bin/activate
+uv pip install -e .
+```
+
+Crea un `.env` en la raíz del repo con tus credenciales:
+
+```bash
+export WANDB_API_KEY=tu_clave_aqui
+```
+
+### Entorno headless (cluster / SLURM)
+
+El rendering headless usa EGL. Las variables necesarias las configura automáticamente `_pipeline_lib.sh`:
+
+```bash
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
 ```
 
 ---
 
 ## Pipeline completo
 
-El entrenamiento tiene 5 etapas que se ejecutan en orden. Las Fases 1a y 1b tienen checkpoints preentrenados disponibles en [HuggingFace](https://huggingface.co/nicklashansen/dreamer4) — puedes saltártelas y entrar directo en la Fase 2.
+Cinco fases que se ejecutan en orden. Las Fases 1a y 1b tienen checkpoints preentrenados disponibles en [HuggingFace](https://huggingface.co/nicklashansen/dreamer4).
 
 ```
-Phase 0  →  scripts/pipeline/train_phase0_collect_episodes.py     # recolección de episodios
-Phase 1a →  scripts/pipeline/train_phase1a_tokenizer.py # tokenizador de frames
-Phase 1b →  scripts/pipeline/train_phase1b_dynamics.py  # world model (dynamics)
+Phase 0  →  scripts/pipeline/launch_phase0_dist.py      # recolección de episodios
+Phase 1a →  scripts/pipeline/train_phase1a_tokenizer.py # tokenizador de frames (VQVAE-like)
+Phase 1b →  scripts/pipeline/train_phase1b_dynamics.py  # world model (RSSM)
 Phase 2  →  scripts/pipeline/train_phase2_finetuning.py # BC + reward head
-Phase 3  →  scripts/pipeline/train_phase3_imagination.py# RL en imaginación (PMPO)
+Phase 3  →  scripts/pipeline/train_phase3_imagination.py # RL en imaginación (PMPO)
 ```
+
+El entrenamiento acumula datos de todos los ciclos anteriores: cada ciclo `k` entrena sobre `cycle0 + cycle1 + … + cycleK`.
 
 ---
 
-## Uso rápido con checkpoints preentrenados
+## Modos de ejecución
 
-Si ya tienes `tokenizer.ckpt` y `dynamics.ckpt` (de HuggingFace o entrenados tú mismo), puedes empezar desde Phase 2:
+### Modo 1 — Desde cero (sin datos previos)
+
+El pipeline completo parte de política random en el ciclo 0 y va mejorando el agente ciclo a ciclo.
 
 ```bash
-# Phase 2 — Agent Finetuning
-python scripts/pipeline/train_phase2_finetuning.py \
-  finetune.tokenizer_ckpt=./checkpoints/tokenizer.ckpt \
-  finetune.dynamics_ckpt=./checkpoints/dynamics.ckpt \
-  data.data_dirs=[./data/demos] \
-  data.frame_dirs=[./data/frames] \
-  trainer.devices=2
+# 64×64, 1 GPU, 30 ciclos
+RES=64 srun --nodes=1 --ntasks=1 --gpus=1 \
+    --cpus-per-task=64 --mem=128G --time=24:00:00 \
+    bash scripts/pipeline/run_cycles.sh
 
-# Phase 3 — Imagination Training
-python scripts/pipeline/train_phase3_imagination.py \
-  agent.finetune_ckpt=./logs/finetune_ckpts/last.ckpt \
-  data.data_dirs=[./data/demos] \
-  data.frame_dirs=[./data/frames] \
-  trainer.devices=2
+# 128×128, 3 GPUs, 30 ciclos
+RES=128 srun --nodes=1 --ntasks=1 --gpus=3 \
+    --cpus-per-task=48 --mem=256G --time=72:00:00 \
+    bash scripts/pipeline/run_cycles.sh
 ```
+
+Variables de entorno opcionales para `run_cycles.sh`:
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `RES` | `64` | Resolución: `64` o `128` |
+| `K` | `30` | Número de ciclos |
+| `RUN_TAG` | `active_64x64` | Nombre del run (carpeta en `./runs/`) |
+| `TASKS` | 5 tareas DMC | Lista separada por comas |
+| `START_FROM_DYNAMICS_CYCLE0` | `false` | Arrancar desde tokenizer+datos externos |
+| `SOURCE_RUN_TAG` | — | Run fuente (requiere la opción anterior) |
+| `DEVICES` | auto-detect | Número de GPUs |
+
+### Modo 2 — Desde datos preentrenados (HuggingFace)
+
+Ciclo 0 usa datos descargados de HF sin colección. Ciclos posteriores colectan con el agente aprendido.
+
+```bash
+# Convertir frames a la resolución deseada (solo una vez)
+python scripts/convert_frames_to_res.py \
+    --input  ./data/cycle0-pretrained/frames \
+    --output ./data/pretrained-64x64/frames \
+    --size 64 --workers 32
+
+# Crear symlink de demos (los demos ya están en la resolución correcta)
+ln -s ./data/cycle0-pretrained/demos ./data/pretrained-64x64/demos
+
+# Lanzar pipeline
+RES=64 BASE_DATA_ROOT=./data/pretrained-64x64 \
+    srun --gpus=4 --cpus-per-task=64 --mem=384G --time=72:00:00 \
+    bash scripts/pipeline/run_cycles_pretrain.sh
+```
+
+Variables adicionales para `run_cycles_pretrain.sh`:
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `BASE_DATA_ROOT` | `./data/cycle0-pretrained` | Directorio con datos del ciclo 0 (HF) |
+| `RUN_TAG` | `pt_active` | Nombre del run |
+| `K` | `10` | Número de ciclos |
 
 ---
 
-## Ciclo recursivo offline
+## Preprocesamiento de frames
 
-La idea central es que el agente puede **mejorar iterativamente** sin acceso online al entorno: cada ciclo genera datos de mejor calidad que el ciclo anterior, que a su vez producen un mejor agente.
-
-```
-Ciclo 0:  datos random  →  entrenar  →  agent_v0.ckpt
-Ciclo 1:  datos con agent_v0  →  re-entrenar  →  agent_v1.ckpt
-Ciclo N:  datos con agent_vN-1  →  re-entrenar  →  agent_vN.ckpt
-```
-
-### Ciclo 0 — bootstrap desde cero (sin datos previos)
+Los frames deben estar en la resolución del modelo **antes** del entrenamiento. El entrenamiento no hace resize en tiempo de ejecución.
 
 ```bash
-# 1. Recolectar episodios con política random
-python scripts/pipeline/train_phase0_collect_episodes.py \
-  collect.out_data_dir=./data/cycle0/demos \
-  collect.out_frames_dir=./data/cycle0/frames \
-  collect.n_episodes_per_task=50
-
-# 2. Phase 1a — Tokenizer
-srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=48:00:00 \
-  python scripts/pipeline/train_phase1a_tokenizer.py \
-  data.frame_dirs=[./data/cycle0/frames] \
-  trainer.devices=2
-
-# 3. Phase 1b — Dynamics
-srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=48:00:00 \
-  python scripts/pipeline/train_phase1b_dynamics.py \
-  dynamics.tokenizer_ckpt=./logs/tokenizer_ckpts/last.ckpt \
-  data.data_dirs=[./data/cycle0/demos] \
-  data.frame_dirs=[./data/cycle0/frames] \
-  trainer.devices=2
-
-# 4. Phase 2 — Finetuning
-srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
-  python scripts/pipeline/train_phase2_finetuning.py \
-  finetune.tokenizer_ckpt=./logs/tokenizer_ckpts/last.ckpt \
-  finetune.dynamics_ckpt=./logs/dynamics_ckpts/last.ckpt \
-  data.data_dirs=[./data/cycle0/demos] \
-  data.frame_dirs=[./data/cycle0/frames] \
-  trainer.devices=2
-
-# 5. Phase 3 — Imagination Training
-srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
-  python scripts/pipeline/train_phase3_imagination.py \
-  agent.finetune_ckpt=./logs/finetune_ckpts/last.ckpt \
-  data.data_dirs=[./data/cycle0/demos] \
-  data.frame_dirs=[./data/cycle0/frames] \
-  trainer.devices=2
-# → produce: ./logs/agent_ckpts/last.ckpt  (agent_v0)
+python scripts/convert_frames_to_res.py \
+    --input  <ruta/frames/originales> \
+    --output <ruta/frames/nuevos> \
+    --size   64          # o 128
+    --workers 32         # procesos en paralelo
 ```
 
-### Ciclo N — usar el agente entrenado para generar mejores datos
-
-```bash
-# Recolectar con la política entrenada del ciclo anterior
-python scripts/pipeline/train_phase0_collect_episodes.py \
-  collect.policy=agent \
-  collect.agent_ckpt=./logs/agent_ckpts/last.ckpt \
-  collect.out_data_dir=./data/cycle1/demos \
-  collect.out_frames_dir=./data/cycle1/frames \
-  collect.n_episodes_per_task=50
-
-# Re-entrenar Phase 2 y 3 acumulando TODOS los ciclos de datos
-# (WMDataModule acepta listas de directorios — une todos los datos)
-srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
-  python scripts/pipeline/train_phase2_finetuning.py \
-  finetune.tokenizer_ckpt=./logs/tokenizer_ckpts/last.ckpt \
-  finetune.dynamics_ckpt=./logs/dynamics_ckpts/last.ckpt \
-  "data.data_dirs=[./data/cycle0/demos,./data/cycle1/demos]" \
-  "data.frame_dirs=[./data/cycle0/frames,./data/cycle1/frames]" \
-  trainer.devices=2
-
-srun --nodes=1 --ntasks-per-node=2 --gres=gpu:2 --mem=64G --time=24:00:00 \
-  python scripts/pipeline/train_phase3_imagination.py \
-  agent.finetune_ckpt=./logs/finetune_ckpts/last.ckpt \
-  "data.data_dirs=[./data/cycle0/demos,./data/cycle1/demos]" \
-  "data.frame_dirs=[./data/cycle0/frames,./data/cycle1/frames]" \
-  trainer.devices=2
-# → produce: agent_v1.ckpt
-```
-
-> **Nota:** En ciclos posteriores no es necesario re-entrenar el Tokenizer ni el Dynamics desde cero. Basta con re-entrenar las Fases 2 y 3 (o hacer fine-tuning de las 4 a la vez si quieres máxima calidad).
-
-### Script de ciclo automático (bash)
-
-Para automatizar N ciclos completos:
-
-```bash
-#!/bin/bash
-# run_cycles.sh — ejecuta K ciclos del pipeline recursivo
-# Uso: bash run_cycles.sh 3
-
-K=${1:-3}
-DEVICES=2
-MEM=64G
-TIME_LONG=48:00:00   # Phase 1a, 1b
-TIME_SHORT=24:00:00  # Phase 2, 3
-SRUN="srun --nodes=1 --ntasks-per-node=${DEVICES} --gres=gpu:${DEVICES} --mem=${MEM}"
-TOK_CKPT=./logs/tokenizer_ckpts/last.ckpt
-DYN_CKPT=./logs/dynamics_ckpts/last.ckpt
-
-DATA_DIRS="./data/cycle0/demos"
-FRAME_DIRS="./data/cycle0/frames"
-
-for CYCLE in $(seq 0 $((K - 1))); do
-  echo "════════ Ciclo $CYCLE ════════"
-
-  OUT_DATA="./data/cycle${CYCLE}/demos"
-  OUT_FRAMES="./data/cycle${CYCLE}/frames"
-
-  # Phase 0 — Colección
-  if [ "$CYCLE" -eq 0 ]; then
-    python scripts/pipeline/train_phase0_collect_episodes.py \
-      collect.out_data_dir=$OUT_DATA \
-      collect.out_frames_dir=$OUT_FRAMES
-  else
-    python scripts/pipeline/train_phase0_collect_episodes.py \
-      collect.policy=agent \
-      collect.agent_ckpt=./logs/agent_ckpts/last.ckpt \
-      collect.out_data_dir=$OUT_DATA \
-      collect.out_frames_dir=$OUT_FRAMES
-  fi
-
-  # Acumular datos de todos los ciclos anteriores
-  DATA_DIRS="${DATA_DIRS},${OUT_DATA}"
-  FRAME_DIRS="${FRAME_DIRS},${OUT_FRAMES}"
-  # (ciclo 0: eliminar la primera entrada vacía)
-  DATA_DIRS=$(echo $DATA_DIRS | sed 's/^,//')
-  FRAME_DIRS=$(echo $FRAME_DIRS | sed 's/^,//')
-
-  # Phase 1a+1b solo en ciclo 0
-  if [ "$CYCLE" -eq 0 ]; then
-    $SRUN --time=$TIME_LONG \
-      python scripts/pipeline/train_phase1a_tokenizer.py \
-      "data.frame_dirs=[$FRAME_DIRS]" trainer.devices=$DEVICES
-
-    $SRUN --time=$TIME_LONG \
-      python scripts/pipeline/train_phase1b_dynamics.py \
-      dynamics.tokenizer_ckpt=$TOK_CKPT \
-      "data.data_dirs=[$DATA_DIRS]" \
-      "data.frame_dirs=[$FRAME_DIRS]" \
-      trainer.devices=$DEVICES
-  fi
-
-  # Phase 2
-  $SRUN --time=$TIME_SHORT \
-    python scripts/pipeline/train_phase2_finetuning.py \
-    finetune.tokenizer_ckpt=$TOK_CKPT \
-    finetune.dynamics_ckpt=$DYN_CKPT \
-    "data.data_dirs=[$DATA_DIRS]" \
-    "data.frame_dirs=[$FRAME_DIRS]" \
-    trainer.devices=$DEVICES
-
-  # Phase 3
-  $SRUN --time=$TIME_SHORT \
-    python scripts/pipeline/train_phase3_imagination.py \
-    agent.finetune_ckpt=./logs/finetune_ckpts/last.ckpt \
-    "data.data_dirs=[$DATA_DIRS]" \
-    "data.frame_dirs=[$FRAME_DIRS]" \
-    trainer.devices=$DEVICES
-
-  # Guardar checkpoint del ciclo
-  cp ./logs/agent_ckpts/last.ckpt ./logs/agent_ckpts/cycle${CYCLE}.ckpt
-  echo "Ciclo $CYCLE completo → ./logs/agent_ckpts/cycle${CYCLE}.ckpt"
-done
-```
+El script preserva la estructura de subdirectorios y hace saves atómicos (`.tmp` → rename).
 
 ---
 
-## Estructura de archivos
+## Estructura del proyecto
 
 ```
 dreamer4/
-├── scripts/pipeline/train_phase0_collect_episodes.py        # Phase 0 — recolección
-├── scripts/pipeline/train_phase1a_tokenizer.py    # Phase 1a — tokenizer
-├── scripts/pipeline/train_phase1b_dynamics.py     # Phase 1b — world model
-├── scripts/pipeline/train_phase2_finetuning.py    # Phase 2 — BC + reward
-├── scripts/pipeline/train_phase3_imagination.py   # Phase 3 — RL en imaginación
+├── scripts/pipeline/
+│   ├── run_cycles.sh                   # Pipeline activo (desde cero)
+│   ├── run_cycles_pretrain.sh          # Pipeline desde datos HF
+│   ├── _pipeline_lib.sh                # Funciones compartidas (setup, steps, eval)
+│   ├── launch_phase0_dist.py           # Phase 0 — colección distribuida
+│   ├── train_phase1a_tokenizer.py      # Phase 1a — tokenizer
+│   ├── train_phase1b_dynamics.py       # Phase 1b — world model
+│   ├── train_phase2_finetuning.py      # Phase 2 — BC + reward
+│   ├── train_phase3_imagination.py     # Phase 3 — RL en imaginación
+│   └── train_utils.py                  # Helpers compartidos (trainer, logger, ckpt)
+│
+├── scripts/
+│   └── convert_frames_to_res.py        # Conversión offline de resolución
 │
 ├── configs/
-│   ├── collect/base.yaml         # config Phase 0
-│   ├── tokenizer/                # config Phase 1a
-│   ├── dynamics/                 # config Phase 1b
-│   ├── finetune/                 # config Phase 2
-│   └── agent/                   # config Phase 3
+│   ├── collect/base.yaml               # Config Phase 0
+│   ├── tokenizer/base_64x64.yaml       # Config Phase 1a (64×64)
+│   ├── tokenizer/base_128x128.yaml     # Config Phase 1a (128×128)
+│   ├── dynamics/base_64x64.yaml        # Config Phase 1b
+│   ├── finetune/base_64x64.yaml        # Config Phase 2
+│   ├── agent/base_64x64.yaml           # Config Phase 3
+│   └── data/
+│       ├── local.yaml                  # Config de datos local
+│       └── cluster.yaml                # Config de datos en cluster
 │
 ├── src/
-│   ├── model.py                  # Tokenizer, Dynamics, TaskEmbedder
-│   ├── agent.py                  # PolicyHead, RewardHead, ValueHead
-│   ├── distributions.py          # SymExp TwoHot (eq.10), PMPO (eq.11)
-│   ├── losses.py                 # dynamics_pretrain_loss (eq.7)
-│   ├── collector.py              # AgentPolicy + collect_task()
-│   ├── wm_dataset.py             # WMDataset
+│   ├── model.py                        # Tokenizer, Dynamics, TaskEmbedder
+│   ├── agent.py                        # PolicyHead, RewardHead, ValueHead
+│   ├── distributions.py                # SymExp TwoHot (eq.10), PMPO (eq.11)
+│   ├── losses.py                       # dynamics_pretrain_loss (eq.7)
+│   ├── wm_dataset.py                   # WMDataset (acciones + frames)
+│   ├── sharded_frame_dataset.py        # ShardedFrameDataset (frames por shard)
+│   ├── task_set.py                     # TASK_SET — 18 tareas DMControl
+│   ├── envs/
+│   │   └── torchrl_wrappers.py         # ParallelEnv + DMControlEnv (EGL)
 │   └── lightning/
-│       ├── tokenizer_module.py   # Phase 1a
-│       ├── dynamics_module.py    # Phase 1b
-│       ├── finetune_module.py    # Phase 2
-│       └── agent_module.py       # Phase 3
+│       ├── tokenizer_module.py         # Phase 1a
+│       ├── frame_datamodule.py         # DataModule para tokenizer
+│       ├── dynamics_module.py          # Phase 1b
+│       ├── wm_datamodule.py            # DataModule para dynamics/finetune/agent
+│       ├── finetune_module.py          # Phase 2
+│       └── agent_module.py             # Phase 3
 │
-├── tasks.json                    # action_dim + CLIP embeddings por tarea
-└── docs/architecture.md          # diagramas Mermaid del pipeline
+├── tasks.json                          # action_dim + CLIP embeddings (234 tareas)
+└── .env                                # WANDB_API_KEY (no commitear)
 ```
+
+---
+
+## Formato de datos
+
+```
+<data_root>/
+├── demos/
+│   └── <task>.pt       # dict con keys: obs, action, reward, done  [T, ...]
+└── frames/
+    └── <task>/
+        └── <task>_shard<N>.pt   # tensor uint8 [S, T, C, H, W]
+```
+
+- Los demos contienen acciones y recompensas; los frames son las observaciones visuales en uint8.
+- Los shards de frames permiten carga eficiente y sampling distribuido.
 
 ---
 
 ## Tareas soportadas
 
-30 tareas de control continuo de DMControl y MMBench. Ver `src/task_set.py` para la lista completa.
+18 tareas de control continuo de DMControl en `TASK_SET` (ver `src/task_set.py`):
+
+```
+walker-{stand,walk,run}    hopper-{stand,hop}         reacher-{easy,hard}
+cheetah-run                cartpole-{swingup,balance,swingup-sparse,balance-sparse}
+cup-catch                  finger-{spin,turn-easy,turn-hard}
+acrobot-swingup            pendulum-swingup
+```
+
+`tasks.json` contiene 234 tareas con embeddings CLIP y dimensiones de acción.
 
 ---
 
