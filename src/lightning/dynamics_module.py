@@ -13,103 +13,8 @@ from model import (
     pack_bottleneck_to_spatial,
 )
 from losses import dynamics_pretrain_loss
-
-
-def _load_frozen_tokenizer(ckpt_path: str, device: torch.device):
-    """
-    Load tokenizer checkpoint, return (encoder, decoder, tok_args).
-    Identical logic to load_frozen_tokenizer_from_pt_ckpt in the original
-    train_phase1b_dynamics.py — kept here to avoid cross-file imports during setup.
-    """
-    from model import Encoder, Decoder, Tokenizer
-
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-
-    # Support both legacy raw-dict checkpoints and Lightning checkpoints.
-    if "state_dict" in ckpt:
-        # Lightning checkpoint: hyper_parameters holds the config,
-        # state_dict has keys prefixed with "model." (Tokenizer) and
-        # "lpips_loss." (LPIPS, not needed here).
-        hp = ckpt.get("hyper_parameters", {})
-        tc = hp.get("cfg", {}).get("tokenizer", {})
-        tok_args = dict(tc) if tc else {}
-
-        full_sd = ckpt["state_dict"]
-        model_sd = {
-            k[len("model."):]: v
-            for k, v in full_sd.items()
-            if k.startswith("model.")
-        }
-        # Strip _orig_mod. prefix added by torch.compile()
-        model_sd = {
-            k.replace("_orig_mod.", ""): v for k, v in model_sd.items()
-        }
-    else:
-        # Legacy format saved directly as a plain dict with "model" and "args".
-        tok_args = dict(ckpt.get("args", {}))
-        model_sd = ckpt["model"]
-        # Strip _orig_mod. prefix added by torch.compile()
-        model_sd = {
-            k.replace("_orig_mod.", ""): v for k, v in model_sd.items()
-        }
-
-    H      = int(tok_args.get("H", 128))
-    W      = int(tok_args.get("W", 128))
-    C      = int(tok_args.get("C", 3))
-    patch  = int(tok_args.get("patch", 4))
-    n_patches = (H // patch) * (W // patch)
-    d_patch   = patch * patch * C
-
-    _enc_kwargs = dict(
-        patch_dim=d_patch,
-        d_model=int(tok_args.get("d_model", 256)),
-        n_latents=int(tok_args.get("n_latents", 16)),
-        n_patches=n_patches,
-        n_heads=int(tok_args.get("n_heads", 4)),
-        depth=int(tok_args.get("depth", 8)),
-        dropout=0.0,
-        mlp_ratio=float(tok_args.get("mlp_ratio", 4.0)),
-        time_every=int(tok_args.get("time_every", 1)),
-        latents_only_time=bool(tok_args.get("latents_only_time", True)),
-        mae_p_min=0.0,
-        mae_p_max=0.0,
-        scale_pos_embeds=bool(tok_args.get("scale_pos_embeds", True)),
-    )
-    if tok_args.get("discrete", False):
-        from model import DiscreteEncoder
-        enc = DiscreteEncoder(
-            **_enc_kwargs,
-            n_categories=int(tok_args.get("d_bottleneck", 32)),
-            temperature=float(tok_args.get("temperature", 1.0)),
-        )
-    else:
-        enc = Encoder(
-            **_enc_kwargs,
-            d_bottleneck=int(tok_args.get("d_bottleneck", 32)),
-        )
-    dec = Decoder(
-        d_bottleneck=int(tok_args.get("d_bottleneck", 32)),
-        d_model=int(tok_args.get("d_model", 256)),
-        n_heads=int(tok_args.get("n_heads", 4)),
-        depth=int(tok_args.get("depth", 8)),
-        n_latents=int(tok_args.get("n_latents", 16)),
-        n_patches=n_patches,
-        d_patch=d_patch,
-        dropout=0.0,
-        mlp_ratio=float(tok_args.get("mlp_ratio", 4.0)),
-        time_every=int(tok_args.get("time_every", 1)),
-        latents_only_time=bool(tok_args.get("latents_only_time", True)),
-        scale_pos_embeds=bool(tok_args.get("scale_pos_embeds", True)),
-    )
-
-    tok = Tokenizer(enc, dec)
-    tok.load_state_dict(model_sd, strict=True)
-    tok = tok.to(device)
-    tok.eval()
-    for p in tok.parameters():
-        p.requires_grad_(False)
-
-    return tok.encoder, tok.decoder, tok_args
+from checkpoint_utils import load_frozen_tokenizer
+from loss_norm import RunningRMS
 
 
 class DynamicsLightningModule(pl.LightningModule):
@@ -136,6 +41,9 @@ class DynamicsLightningModule(pl.LightningModule):
         # We declare the attribute here so type-checkers are happy.
         self.dyn: Optional[Dynamics] = None
 
+        # RMS loss normalisation (Dreamer 4): normalise total WM loss
+        self.rms_wm = RunningRMS()
+
         # Cached after setup()
         self._tok_args: Optional[Dict[str, Any]] = None
         self._patch: int = 4
@@ -154,7 +62,7 @@ class DynamicsLightningModule(pl.LightningModule):
         dc = self.cfg.dynamics
 
         # Load frozen tokenizer onto the correct device
-        encoder, decoder, tok_args = _load_frozen_tokenizer(
+        encoder, decoder, tok_args = load_frozen_tokenizer(
             dc.tokenizer_ckpt, device=self.device
         )
 
@@ -240,7 +148,7 @@ class DynamicsLightningModule(pl.LightningModule):
         B      = z1.shape[0]
         B_self = max(0, min(B - 1, int(round(dc.self_fraction * B))))
 
-        loss, aux = dynamics_pretrain_loss(
+        raw_loss, aux = dynamics_pretrain_loss(
             self.dyn,
             z1=z1,
             actions=actions,
@@ -251,16 +159,19 @@ class DynamicsLightningModule(pl.LightningModule):
             bootstrap_start=dc.bootstrap_start,
             agent_tokens=None,
         )
+        loss = self.rms_wm.normalize(raw_loss)
 
         self.log_dict(
             {
                 "loss/total":          loss,
+                "loss/wm_raw":         raw_loss,
                 "loss/flow_mse":       aux["flow_mse"],
                 "loss/bootstrap_mse":  aux["bootstrap_mse"],
                 "loss/loss_emp":       aux["loss_emp"],
                 "loss/loss_self":      aux["loss_self"],
                 "stats/sigma_mean":    aux["sigma_mean"],
                 "stats/B_self":        float(B_self),
+                "stats/rms_wm":        self.rms_wm.sq.sqrt(),
             },
             on_step=True,
             on_epoch=False,
@@ -274,6 +185,7 @@ class DynamicsLightningModule(pl.LightningModule):
         self._last_act_mask = act_mask
         self._last_z1       = z1
         self._last_B_self   = B_self
+        self._last_raw_loss = raw_loss
 
         return loss
 
@@ -293,9 +205,12 @@ class DynamicsLightningModule(pl.LightningModule):
         warmup = int(dc.get("warmup_steps", 0))
         total  = self.trainer.max_steps
         if warmup > 0 and total > 0:
+            schedule = str(dc.get("lr_schedule", "constant_with_warmup")).lower()
             def lr_lambda(step: int) -> float:
                 if step < warmup:
                     return step / max(1, warmup)
+                if schedule == "constant_with_warmup":
+                    return 1.0
                 progress = (step - warmup) / max(1, total - warmup)
                 return 0.5 * (1.0 + math.cos(math.pi * progress))
             sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
@@ -305,3 +220,10 @@ class DynamicsLightningModule(pl.LightningModule):
     def configure_gradient_clipping(self, optimizer, gradient_clip_val=None, gradient_clip_algorithm=None):
         clip = float(self.cfg.dynamics.get("grad_clip", 1.0))
         self.clip_gradients(optimizer, gradient_clip_val=clip, gradient_clip_algorithm="norm")
+
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        # Backwards compat: checkpoints saved before RunningRMS was added
+        # don't have rms_wm.sq — initialise it to the default value (ones(1)).
+        state = checkpoint.get("state_dict", {})
+        if "rms_wm.sq" not in state:
+            state["rms_wm.sq"] = torch.ones(1)
