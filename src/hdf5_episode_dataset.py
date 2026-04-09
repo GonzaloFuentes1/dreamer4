@@ -188,7 +188,11 @@ class HDF5EpisodeDataset(Dataset):
         Ruta(s) a archivos .h5. Cada archivo corresponde a UNA tarea, en un
         ciclo de colección. Para multi-tarea / multi-ciclo, pasar varias rutas.
     seq_len:
-        Número de pasos a devolver por sample.
+        Número de pasos lógicos a devolver (después de aplicar frameskip).
+    frameskip:
+        Submuestreo temporal: devuelve 1 de cada `frameskip` frames.
+        Permite colectar a frameskip=1 y variar el frameskip en entrenamiento
+        sin recolectar datos. El seq_len es en pasos post-skip.
     mode:
         "frames"   — sample libre sobre todos los starts válidos
         "episodes" — sample alineado al inicio de episodio, dentro del episodio
@@ -205,13 +209,18 @@ class HDF5EpisodeDataset(Dataset):
         self,
         h5_paths: Union[str, Path, Sequence[Union[str, Path]]],
         seq_len:       int  = 16,
+        frameskip:     int  = 1,
         mode:          str  = "frames",
         iid_sampling:  bool = True,
         cache_action:  bool = True,
         rdcc_mb:       int  = 256,
     ):
         super().__init__()
+        self.frameskip    = max(1, int(frameskip))
+        # seq_len es en pasos lógicos (post-frameskip).
+        # Para leer seq_len pasos con skip, necesitamos (seq_len-1)*frameskip+1 frames raw.
         self.seq_len      = int(seq_len)
+        self._raw_window  = (self.seq_len - 1) * self.frameskip + 1
         self.mode         = mode
         self.iid_sampling = iid_sampling
         self.rdcc_bytes   = int(rdcc_mb) * 1024 * 1024
@@ -242,10 +251,10 @@ class HDF5EpisodeDataset(Dataset):
                 }
 
                 if mode == "frames":
-                    n_starts = max(0, n_steps - self.seq_len + 1)
+                    n_starts = max(0, n_steps - self._raw_window + 1)
                 else:
-                    # solo episodios con suficientes frames
-                    n_starts = int(np.sum(ep_len >= self.seq_len))
+                    # solo episodios con suficientes frames raw para seq_len lógicos
+                    n_starts = int(np.sum(ep_len >= self._raw_window))
 
                 if mode == "episodes" and cache_action and "action" in f:
                     meta["action_cache"] = torch.from_numpy(f["action"][:])
@@ -262,7 +271,7 @@ class HDF5EpisodeDataset(Dataset):
 
         print(
             f"[HDF5EpisodeDataset] mode={mode}, archivos={len(self._metas)}, "
-            f"total_starts={total_starts:,}, seq_len={self.seq_len}"
+            f"total_starts={total_starts:,}, seq_len={self.seq_len}, frameskip={self.frameskip}"
         )
 
     # ------------------------------------------------------------------
@@ -296,30 +305,31 @@ class HDF5EpisodeDataset(Dataset):
 
         if self.mode == "frames":
             start = local_idx
-            end   = start + self.seq_len
-            pix   = f["pixels"][start:end]              # (T, 3, H, W) uint8
+            end   = start + self._raw_window
+            pix   = f["pixels"][start:end:self.frameskip]   # (seq_len, 3, H, W) uint8
             return torch.from_numpy(pix.astype(np.float32)) / 255.0
 
         # ── mode = "episodes" ──────────────────────────────────────
-        valid_mask    = meta["ep_len"] >= self.seq_len
+        valid_mask    = meta["ep_len"] >= self._raw_window
         valid_indices = np.where(valid_mask)[0]
         ep_i   = valid_indices[local_idx % len(valid_indices)]
         ep_off = int(meta["ep_offset"][ep_i])
         ep_len = int(meta["ep_len"][ep_i])
 
-        max_off = ep_len - self.seq_len
+        max_off = ep_len - self._raw_window
         off     = random.randint(0, max_off) if max_off > 0 else 0
         start   = ep_off + off
-        end     = start + self.seq_len
+        end     = start + self._raw_window
 
-        pix = torch.from_numpy(f["pixels"][start:end].astype(np.float32)) / 255.0
+        pix = torch.from_numpy(f["pixels"][start:end:self.frameskip].astype(np.float32)) / 255.0
 
         if "action_cache" in meta:
-            action = meta["action_cache"][start:end]
-            reward = meta["reward_cache"][start:end]
+            # Para acciones: tomamos el primer action de cada grupo de frameskip
+            action = meta["action_cache"][start:end:self.frameskip]
+            reward = meta["reward_cache"][start:end:self.frameskip]
         else:
-            action = torch.from_numpy(f["action"][start:end])
-            reward = torch.from_numpy(f["reward"][start:end])
+            action = torch.from_numpy(f["action"][start:end:self.frameskip])
+            reward = torch.from_numpy(f["reward"][start:end:self.frameskip])
 
         return {"frames": pix, "action": action, "reward": reward}
 
