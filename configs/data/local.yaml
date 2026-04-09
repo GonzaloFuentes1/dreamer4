@@ -2,6 +2,12 @@
 # Data paths for local development. Override with your actual paths.
 
 # Frame shards (preprocessed by preprocess_dataset.py) — used by tokenizer training
+# Alternativa a frame_dirs/data_dirs: apunta a un directorio raíz y se
+# descubren automáticamente todos los ciclos (subdirectorios con .h5 o .pt).
+# Si se define data_root, frame_dirs y data_dirs son ignorados.
+# Ejemplo: data_root: /workspace1/gofuentes/dreamer4/data
+data_root: null
+
 frame_dirs:
   - /data/expert-shards
   - /data/mixed-small-shards

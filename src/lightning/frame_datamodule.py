@@ -13,6 +13,39 @@ from task_set import TASK_SET
 from sharded_frame_dataset import ShardedFrameDataset
 from hdf5_episode_dataset import HDF5EpisodeDataset
 
+def _discover_h5_paths(data_dirs: list[str], tasks: list[str]) -> list[str]:
+    """Descubre archivos .h5 en los data_dirs dados para las tasks."""
+    from pathlib import Path
+    paths = []
+    for dd in data_dirs:
+        for t in tasks:
+            p = Path(dd) / f"{t}.h5"
+            if p.exists():
+                paths.append(str(p))
+    return paths
+
+
+def _discover_data_dirs_from_root(root: str) -> list[str]:
+    """
+    Dado un directorio raíz, descubre automáticamente todos los subdirectorios
+    que contienen datos (archivos .h5 o subdirectorios con .pt shards).
+    Permite pasar data_root: data/ en lugar de listar cada ciclo.
+    """
+    from pathlib import Path
+    root_path = Path(root)
+    if not root_path.is_dir():
+        return [root]
+    
+    subdirs = sorted([
+        str(d) for d in root_path.iterdir()
+        if d.is_dir() and (
+            any(d.glob("*.h5")) or       # HDF5
+            any(d.glob("**/*.pt"))        # .pt shards
+        )
+    ])
+    return subdirs if subdirs else [root]
+
+
 
 def _worker_init_fn(worker_id: int):
     info = torch.utils.data.get_worker_info()
@@ -39,13 +72,12 @@ class FrameDataModule(pl.LightningDataModule):
         dc = self.cfg.data
         tasks = list(dc.tasks) if dc.get("tasks") else TASK_SET
         # Detectar HDF5 en data_dirs (si existeн, los usamos en lugar de .pt shards)
-        data_dirs = list(dc.get("data_dirs", dc.get("frame_dirs", [])))
-        h5_paths = [
-            dd + f"/{t}.h5"
-            for dd in data_dirs
-            for t in tasks
-            if __import__("pathlib").Path(dd + f"/{t}.h5").exists()
-        ]
+        # Soporte para data_root: descubre ciclos automáticamente si se define
+        if dc.get("data_root"):
+            data_dirs = _discover_data_dirs_from_root(str(dc.data_root))
+        else:
+            data_dirs = list(dc.get("data_dirs", dc.get("frame_dirs", [])))
+        h5_paths = _discover_h5_paths(data_dirs, tasks)
         use_hdf5 = len(h5_paths) > 0 and dc.get("use_hdf5", True)
         if use_hdf5:
             self._dataset = HDF5EpisodeDataset(

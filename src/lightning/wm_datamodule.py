@@ -13,6 +13,39 @@ from task_set import TASK_SET
 from wm_dataset import WMDataset, collate_batch
 from hdf5_episode_dataset import HDF5EpisodeDataset
 
+def _discover_h5_paths(data_dirs: list[str], tasks: list[str]) -> list[str]:
+    """Descubre archivos .h5 en los data_dirs dados para las tasks."""
+    from pathlib import Path
+    paths = []
+    for dd in data_dirs:
+        for t in tasks:
+            p = Path(dd) / f"{t}.h5"
+            if p.exists():
+                paths.append(str(p))
+    return paths
+
+
+def _discover_data_dirs_from_root(root: str) -> list[str]:
+    """
+    Dado un directorio raíz, descubre automáticamente todos los subdirectorios
+    que contienen datos (archivos .h5 o subdirectorios con .pt shards).
+    Permite pasar data_root: data/ en lugar de listar cada ciclo.
+    """
+    from pathlib import Path
+    root_path = Path(root)
+    if not root_path.is_dir():
+        return [root]
+    
+    subdirs = sorted([
+        str(d) for d in root_path.iterdir()
+        if d.is_dir() and (
+            any(d.glob("*.h5")) or       # HDF5
+            any(d.glob("**/*.pt"))        # .pt shards
+        )
+    ])
+    return subdirs if subdirs else [root]
+
+
 
 def _worker_init_fn(worker_id: int):
     info = torch.utils.data.get_worker_info()
@@ -49,14 +82,16 @@ class WMDataModule(pl.LightningDataModule):
         else:
             use_actions = self.cfg.dynamics.use_actions
         # Detectar si hay archivos HDF5 disponibles (escritos por Phase-0 con use_hdf5=true)
-        data_dirs = OmegaConf.to_container(dc.data_dirs, resolve=True)
-        frame_dirs = OmegaConf.to_container(dc.frame_dirs, resolve=True)
-        h5_paths = [
-            dd + f"/{t}.h5"
-            for dd in (data_dirs if isinstance(data_dirs, list) else [data_dirs])
-            for t in tasks
-            if __import__("pathlib").Path(dd + f"/{t}.h5").exists()
-        ]
+        # Soporte para data_root: descubre ciclos automáticamente si se define
+        if dc.get("data_root"):
+            data_dirs = _discover_data_dirs_from_root(str(dc.data_root))
+            frame_dirs = data_dirs  # mismo root para frames
+        else:
+            data_dirs = OmegaConf.to_container(dc.data_dirs, resolve=True)
+            frame_dirs = OmegaConf.to_container(dc.frame_dirs, resolve=True)
+        h5_paths = _discover_h5_paths(
+            data_dirs if isinstance(data_dirs, list) else [data_dirs], tasks
+        )
         use_hdf5 = len(h5_paths) > 0 and dc.get("use_hdf5", True)
         if use_hdf5 and is_rank0:
             print(f"[WMDataModule] Usando HDF5EpisodeDataset ({len(h5_paths)} archivos)")
