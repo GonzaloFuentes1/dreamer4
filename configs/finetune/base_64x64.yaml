@@ -7,10 +7,11 @@ dynamics_ckpt: ???
 packing_factor: 2
 
 # Architecture (must match dynamics/base_64x64)
-d_model_dyn: 512
+d_model_dyn: 768
 dyn_depth: 8
-n_heads: 4
-dropout: 0.1
+n_heads: 8
+dropout: 0.0
+scale_pos_embeds: false
 mlp_ratio: 4.0
 time_every: 4
 n_register: 4

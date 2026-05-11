@@ -15,8 +15,8 @@ from model import (
     DiscreteTokenizer,
     temporal_patchify,
     recon_loss_from_mae,
-    RunningRMSNorm,
 )
+from loss_norm import RunningRMS
 from losses import LPIPSLoss
 
 
@@ -117,8 +117,8 @@ class TokenizerLightningModule(pl.LightningModule):
         self._W     = int(tc.W)
         self._C     = int(tc.C)
 
-        self._rms_mse   = RunningRMSNorm()
-        self._rms_lpips = RunningRMSNorm()
+        self._rms_mse   = RunningRMS()
+        self._rms_lpips = RunningRMS()
         self._use_loss_norm = bool(tc.get("use_loss_norm", False))
 
         if cfg.get("compile", False):
@@ -169,7 +169,7 @@ class TokenizerLightningModule(pl.LightningModule):
             lp   = self.lpips_loss(pred, patches, mae_mask, H=self._H, W=self._W, C=self._C, patch=self._patch)
             plain_total = mse + lp + entropy_loss
             if self._use_loss_norm:
-                loss = self._rms_mse(mse) + self._rms_lpips(lp) + entropy_loss
+                loss = self._rms_mse.normalize(mse) + self._rms_lpips.normalize(lp) + entropy_loss
             else:
                 loss = plain_total
         else:

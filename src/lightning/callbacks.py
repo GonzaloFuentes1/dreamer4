@@ -300,72 +300,75 @@ class AgentEvalCallback(pl.Callback):
                 print(f"[EvalCallback] Aviso: no se pudo cargar lang_emb ({e})")
             ep_returns = []
 
-            for _ in range(self.n_episodes):
-                ts = env.reset()
-                z_buf    = None
-                act_buf  = None
-                task_buf = None
-                prev_act = torch.zeros(1, 1, action_dim, device=device)
-                ep_return = 0.0
-                step_count = 0
+            try:
+                for _ in range(self.n_episodes):
+                    ts = env.reset()
+                    z_buf    = None
+                    act_buf  = None
+                    task_buf = None
+                    prev_act = torch.zeros(1, 1, action_dim, device=device)
+                    ep_return = 0.0
+                    step_count = 0
 
-                while not ts.last() and step_count < self.episode_len:
-                    # Render frame
-                    frame_np = env.physics.render(
-                        height=self.img_size, width=self.img_size,
-                        camera_id=self.camera_id
-                    )
-                    frame = torch.from_numpy(frame_np.copy()).permute(2, 0, 1)  # (3,H,W)
-                    frame_f = frame.float().div(255.0).to(device)
-                    frame_in = frame_f.unsqueeze(0).unsqueeze(0)  # (1,1,3,H,W)
+                    while not ts.last() and step_count < self.episode_len:
+                        # Render frame
+                        frame_np = env.physics.render(
+                            height=self.img_size, width=self.img_size,
+                            camera_id=self.camera_id
+                        )
+                        frame = torch.from_numpy(frame_np.copy()).permute(2, 0, 1)  # (3,H,W)
+                        frame_f = frame.float().div(255.0).to(device)
+                        frame_in = frame_f.unsqueeze(0).unsqueeze(0)  # (1,1,3,H,W)
 
-                    with torch.no_grad():
-                        patches = temporal_patchify(frame_in, patch)
-                        z_new, _ = encoder(patches)
-                        z_new = pack_bottleneck_to_spatial(z_new, n_spatial=n_spatial, k=pf)  # (1,1,ns,ds)
+                        with torch.no_grad():
+                            patches = temporal_patchify(frame_in, patch)
+                            z_new, _ = encoder(patches)
+                            z_new = pack_bottleneck_to_spatial(z_new, n_spatial=n_spatial, k=pf)  # (1,1,ns,ds)
 
-                        task_new = task_embedder(task_inp, B=1, T=1)  # (1,1,n_agent,d)
+                            task_new = task_embedder(task_inp, B=1, T=1)  # (1,1,n_agent,d)
 
-                        z_buf    = z_new    if z_buf    is None else torch.cat([z_buf,    z_new],    dim=1)
-                        act_buf  = prev_act if act_buf  is None else torch.cat([act_buf,  prev_act], dim=1)
-                        task_buf = task_new if task_buf is None else torch.cat([task_buf, task_new], dim=1)
+                            z_buf    = z_new    if z_buf    is None else torch.cat([z_buf,    z_new],    dim=1)
+                            act_buf  = prev_act if act_buf  is None else torch.cat([act_buf,  prev_act], dim=1)
+                            task_buf = task_new if task_buf is None else torch.cat([task_buf, task_new], dim=1)
 
-                        # Trim context
-                        if z_buf.shape[1] > self.context_len:
-                            z_buf    = z_buf[:,    -self.context_len:]
-                            act_buf  = act_buf[:,  -self.context_len:]
-                            task_buf = task_buf[:, -self.context_len:]
+                            # Trim context
+                            if z_buf.shape[1] > self.context_len:
+                                z_buf    = z_buf[:,    -self.context_len:]
+                                act_buf  = act_buf[:,  -self.context_len:]
+                                task_buf = task_buf[:, -self.context_len:]
 
-                        T_ctx = z_buf.shape[1]
-                        step_t = torch.full((1, T_ctx), emax,       device=device, dtype=torch.long)
-                        sig_t  = torch.full((1, T_ctx), k_max - 1,  device=device, dtype=torch.long)
+                            T_ctx = z_buf.shape[1]
+                            step_t = torch.full((1, T_ctx), emax,       device=device, dtype=torch.long)
+                            sig_t  = torch.full((1, T_ctx), k_max - 1,  device=device, dtype=torch.long)
 
-                        _, h_t = dyn(act_buf, step_t, sig_t, z_buf,
-                                     act_mask=torch.ones_like(act_buf), agent_tokens=task_buf)
-                        h_flat = h_t[:, -1].flatten(1)  # (1, state_dim)
+                            _, h_t = dyn(act_buf, step_t, sig_t, z_buf,
+                                         act_mask=torch.ones_like(act_buf), agent_tokens=task_buf)
+                            h_flat = h_t[:, -1].flatten(1)  # (1, state_dim)
 
-                        act_mask = torch.ones(1, action_dim, device=device)
-                        _, action = policy_head.sample(h_flat, act_mask=act_mask)
-                        action_np = action.squeeze(0).cpu().numpy()
+                            act_mask = torch.ones(1, action_dim, device=device)
+                            _, action = policy_head.sample(h_flat, act_mask=act_mask)
+                            action_np = action.squeeze(0).cpu().numpy()
 
-                    # Rescale [-1,1] → env action spec
-                    spec = env.action_spec()
-                    lo, hi = spec.minimum, spec.maximum
-                    n_active = len(lo)
-                    action_env = ((action_np[:n_active] + 1.0) / 2.0 * (hi - lo) + lo).clip(lo, hi)
+                        # Rescale [-1,1] → env action spec
+                        spec = env.action_spec()
+                        lo, hi = spec.minimum, spec.maximum
+                        n_active = len(lo)
+                        action_env = ((action_np[:n_active] + 1.0) / 2.0 * (hi - lo) + lo).clip(lo, hi)
 
-                    # frame_skip: advance physics N steps, accumulate reward
-                    for _ in range(self.frame_skip):
-                        ts = env.step(action_env)
-                        ep_return += float(ts.reward or 0.0)
-                        if ts.last():
-                            break
-                    # Zero out inactive dims so dynamics sees the same format as training
-                    action_np[n_active:] = 0.0
-                    prev_act = torch.from_numpy(action_np).to(device).view(1, 1, -1)
-                    step_count += 1
+                        # frame_skip: advance physics N steps, accumulate reward
+                        for _ in range(self.frame_skip):
+                            ts = env.step(action_env)
+                            ep_return += float(ts.reward or 0.0)
+                            if ts.last():
+                                break
+                        # Zero out inactive dims so dynamics sees the same format as training
+                        action_np[n_active:] = 0.0
+                        prev_act = torch.from_numpy(action_np).to(device).view(1, 1, -1)
+                        step_count += 1
 
-                ep_returns.append(ep_return)
+                    ep_returns.append(ep_return)
+            finally:
+                env.close()
 
             mean_ret = float(np.mean(ep_returns))
             returns_per_task[task] = mean_ret
