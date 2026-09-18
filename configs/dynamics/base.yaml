@@ -16,7 +16,7 @@ mlp_ratio: 4.0
 time_every: 4
 n_register: 4
 n_agent: 1
-space_mode: wm_agent_isolated   # choices: wm_agent_isolated, wm_agent
+space_mode: wm_agent_isolated   # choices: wm_agent_isolated (fase 1b), wm_agent_read (fases 2-3), wm_agent (mezcla total, no recomendado)
 scale_pos_embeds: false          # keep false (ref default: better perf without scaling)
 k_max: 8                        # must be a power of 2
 
@@ -38,3 +38,9 @@ eval_ctx: 8
 eval_horizon: 16
 eval_schedule: shortcut   # choices: finest, shortcut
 eval_d: 0.25
+
+# --- transformer eficiente (Dreamer 4, seccion 3.4) ---
+qk_norm: true             # RMSNorm sobre q,k: "to increase training stability"
+soft_cap: 50.0            # acotado tanh de logits; 0 lo desactiva y reactiva flash-attn
+use_rope: true            # RoPE en vez de sinusoidal aditivo
+n_kv_heads: null          # GQA: p.ej. n_heads/4. null = sin GQA

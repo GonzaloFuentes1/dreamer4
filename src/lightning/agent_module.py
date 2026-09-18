@@ -28,6 +28,7 @@ import pytorch_lightning as pl
 from omegaconf import DictConfig
 
 from model import (
+    build_attn_kw,
     Dynamics,
     TaskEmbedder,
     Encoder,
@@ -165,6 +166,7 @@ def _load_finetune_checkpoint(
         mlp_ratio=ac_cfg.mlp_ratio,
         time_every=ac_cfg.time_every,
         space_mode=ac_cfg.space_mode,
+        attn_kw=build_attn_kw(ac_cfg),
     )
     dyn_sd = {k[4:]: v for k, v in sd.items() if k.startswith("dyn.")}
     if dyn_sd:
@@ -406,6 +408,7 @@ class AgentLightningModule(pl.LightningModule):
                 sched=sched,
                 actions=act_ext,
                 act_mask=mask_ext,
+                tau_ctx=float(getattr(ac, "tau_ctx", 0.9)),
             )  # (B, n_spatial, d_spatial)
 
             # 5. Append and slide window if needed

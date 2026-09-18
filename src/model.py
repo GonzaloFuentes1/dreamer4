@@ -89,6 +89,34 @@ def sinusoid_table(n: int, d: int, base: float = 10000.0, device=None) -> torch.
     return torch.where((i % 2) == 0, torch.sin(ang), torch.cos(ang))  # (n,d) fp32
 
 
+def rope_tables(L: int, head_dim: int, *, base: float = 10000.0, device=None, dtype=None):
+    """
+    Tablas cos/sin de RoPE (Su et al. 2021), que Dreamer 4 usa en la seccion 3.4.
+    Devuelve (cos, sin) de forma (1,1,L,head_dim), listas para difundir sobre
+    (N, H, L, head_dim). head_dim debe ser par.
+    """
+    assert head_dim % 2 == 0, "RoPE necesita head_dim par"
+    half = head_dim // 2
+    pos = torch.arange(L, device=device, dtype=torch.float32).unsqueeze(1)      # (L,1)
+    inv = torch.exp(-math.log(base) * torch.arange(half, device=device, dtype=torch.float32) / half)
+    ang = pos * inv.unsqueeze(0)                                                # (L,half)
+    cos = torch.cos(ang).repeat_interleave(2, dim=-1)                           # (L,head_dim)
+    sin = torch.sin(ang).repeat_interleave(2, dim=-1)
+    cos = cos.view(1, 1, L, head_dim)
+    sin = sin.view(1, 1, L, head_dim)
+    if dtype is not None:
+        cos, sin = cos.to(dtype), sin.to(dtype)
+    return cos, sin
+
+
+def apply_rope(x_nhld: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Rota pares adyacentes de canales: (x0,x1) -> (x0 cos - x1 sin, x0 sin + x1 cos)."""
+    x1 = x_nhld[..., 0::2]
+    x2 = x_nhld[..., 1::2]
+    rot = torch.stack((-x2, x1), dim=-1).flatten(-2)
+    return x_nhld * cos + rot * sin
+
+
 def add_sinusoidal_positions(tokens_btSd: torch.Tensor, scale_pos_embeds: bool = True) -> torch.Tensor:
     B, T, S, D = tokens_btSd.shape
     device = tokens_btSd.device
@@ -164,17 +192,86 @@ class MLP(nn.Module):
         return y
 
 
+def build_attn_kw(cfg) -> dict:
+    """
+    Opciones del transformer eficiente de Dreamer 4 (seccion 3.4) leidas del
+    config. Si una clave falta se conserva el comportamiento anterior, de modo
+    que los checkpoints ya entrenados siguen cargando sin tocar nada.
+      qk_norm    : RMSNorm sobre q y k          (estabilidad)
+      soft_cap   : acotado tanh de los logits   (estabilidad; desactiva flash-attn)
+      use_rope   : RoPE en lugar del sinusoidal aditivo
+      n_kv_heads : GQA (el paper solo la usa en la dinamica)
+    """
+    g = (lambda k, d: cfg.get(k, d)) if hasattr(cfg, "get") else (lambda k, d: getattr(cfg, k, d))
+    kw = {}
+    if bool(g("qk_norm", False)):
+        kw["qk_norm"] = True
+    if float(g("soft_cap", 0.0) or 0.0) > 0.0:
+        kw["soft_cap"] = float(g("soft_cap", 0.0))
+    if bool(g("use_rope", False)):
+        kw["rope"] = True
+    n_kv = g("n_kv_heads", None)
+    if n_kv:
+        kw["n_kv_heads"] = int(n_kv)
+    return kw
+
+
 class MultiheadSelfAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0):
+    """
+    Dreamer 4, seccion 3.4: "We start from a standard transformer with pre-layer
+    RMSNorm, RoPE, and SwiGLU. We employ QKNorm and attention logit soft capping
+    to increase training stability." Y ademas GQA en la dinamica.
+
+    - `qk_norm`   : RMSNorm sobre q y k por cabeza antes del producto.
+    - `soft_cap`  : logits <- c*tanh(logits/c). SDPA no expone los logits, asi
+                    que con soft_cap>0 se usa una ruta de atencion manual: es
+                    mas lenta que flash-attention, y por eso es opcional.
+    - `n_kv_heads`: GQA. None => tantas como cabezas de query (sin GQA).
+    - `rope`      : rotacion posicional aplicada a q y k (ver RoPE mas abajo).
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        dropout: float = 0.0,
+        *,
+        qk_norm: bool = False,   # los configs lo ponen a True (paper 3.4); el
+                                 # default conserva el comportamiento anterior
+                                 # para no romper checkpoints ya entrenados
+        soft_cap: float = 0.0,
+        n_kv_heads: Optional[int] = None,
+        rope: bool = False,
+        rope_base: float = 10000.0,
+    ):
         super().__init__()
         assert d_model % n_heads == 0
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
         self.dropout_p = float(dropout)
+        self.soft_cap = float(soft_cap)
+        self.use_rope = bool(rope)
+        self.rope_base = float(rope_base)
 
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=True)
+        self.n_kv_heads = int(n_kv_heads) if n_kv_heads else n_heads
+        assert self.n_heads % self.n_kv_heads == 0, "n_heads debe ser multiplo de n_kv_heads"
+        self.n_rep = self.n_heads // self.n_kv_heads
+
+        # Sin GQA se conserva el `qkv` fusionado con el MISMO nombre de parametro
+        # que la version anterior, para no romper los checkpoints ya entrenados.
+        # Solo con GQA (n_kv_heads < n_heads) hacen falta proyecciones separadas.
+        self.fused_qkv = (self.n_kv_heads == n_heads)
+        if self.fused_qkv:
+            self.qkv = nn.Linear(d_model, 3 * d_model, bias=True)
+        else:
+            self.q_proj = nn.Linear(d_model, n_heads * self.head_dim, bias=True)
+            self.k_proj = nn.Linear(d_model, self.n_kv_heads * self.head_dim, bias=True)
+            self.v_proj = nn.Linear(d_model, self.n_kv_heads * self.head_dim, bias=True)
         self.out = nn.Linear(d_model, d_model, bias=True)
+
+        self.q_norm = RMSNorm(self.head_dim) if qk_norm else None
+        self.k_norm = RMSNorm(self.head_dim) if qk_norm else None
 
     def forward(self, x_nld: torch.Tensor, *, attn_mask: Optional[torch.Tensor] = None, is_causal: bool = False):
         """
@@ -182,20 +279,57 @@ class MultiheadSelfAttention(nn.Module):
         attn_mask: bool, True means "allowed to attend" (for torch SDPA), broadcastable to (N,1,L,L) or (N,H,L,L)
         """
         N, L, D = x_nld.shape
-        q, k, v = self.qkv(x_nld).chunk(3, dim=-1)
 
-        q = q.view(N, L, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(N, L, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(N, L, self.n_heads, self.head_dim).transpose(1, 2)
+        if self.fused_qkv:
+            q, k, v = self.qkv(x_nld).chunk(3, dim=-1)
+            q = q.view(N, L, self.n_heads, self.head_dim).transpose(1, 2)
+            k = k.view(N, L, self.n_kv_heads, self.head_dim).transpose(1, 2)
+            v = v.view(N, L, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        else:
+            q = self.q_proj(x_nld).view(N, L, self.n_heads, self.head_dim).transpose(1, 2)
+            k = self.k_proj(x_nld).view(N, L, self.n_kv_heads, self.head_dim).transpose(1, 2)
+            v = self.v_proj(x_nld).view(N, L, self.n_kv_heads, self.head_dim).transpose(1, 2)
+
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        if self.use_rope:
+            cos, sin = rope_tables(L, self.head_dim, base=self.rope_base,
+                                   device=x_nld.device, dtype=q.dtype)
+            q = apply_rope(q, cos, sin)
+            k = apply_rope(k, cos, sin)
+
+        if self.n_rep > 1:  # GQA: cada grupo de queries comparte un par k/v
+            k = k.repeat_interleave(self.n_rep, dim=1)
+            v = v.repeat_interleave(self.n_rep, dim=1)
 
         drop = self.dropout_p if self.training else 0.0
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop, is_causal=is_causal)
+
+        if self.soft_cap > 0.0:
+            # Ruta manual: SDPA no deja tocar los logits antes del softmax.
+            scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            c = self.soft_cap
+            scores = c * torch.tanh(scores / c)
+            if is_causal:
+                causal = torch.ones((L, L), dtype=torch.bool, device=x_nld.device).tril()
+                scores = scores.masked_fill(~causal, float("-inf"))
+            if attn_mask is not None:
+                scores = scores.masked_fill(~attn_mask, float("-inf"))
+            attn = scores.softmax(dim=-1)
+            if drop > 0.0:
+                attn = F.dropout(attn, p=drop)
+            y = torch.matmul(attn, v)
+        else:
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop, is_causal=is_causal)
+
         y = y.transpose(1, 2).contiguous().view(N, L, D)
         return self.out(y)
 
 
 class SpaceSelfAttentionModality(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, modality_ids: torch.Tensor, n_latents: int, mode: str, dropout: float):
+    def __init__(self, d_model: int, n_heads: int, modality_ids: torch.Tensor, n_latents: int, mode: str, dropout: float,
+                 *, attn_kw: Optional[dict] = None):
         super().__init__()
         self.n_latents = int(n_latents)
         self.mode = mode
@@ -206,7 +340,7 @@ class SpaceSelfAttentionModality(nn.Module):
         attn_mask = allow.unsqueeze(0).unsqueeze(0)                # (1,1,S,S) True=allowed (PyTorch SDPA bool mask)
         self.register_buffer("attn_mask", attn_mask, persistent=False)
 
-        self.attn = MultiheadSelfAttention(d_model, n_heads, dropout=dropout)
+        self.attn = MultiheadSelfAttention(d_model, n_heads, dropout=dropout, **(attn_kw or {}))
 
     def _build_allow(self, S: int) -> torch.Tensor:
         device = self.modality_ids.device
@@ -233,6 +367,21 @@ class SpaceSelfAttentionModality(nn.Module):
         if self.mode == "wm_agent":
             # full mixing across modalities
             return torch.ones((S, S), dtype=torch.bool, device=device)
+
+        if self.mode == "wm_agent_read":
+            # Dreamer 4, seccion 3.3: "the agent tokens attend to themselves and
+            # all other modalities [...] no other modalities can attend back to
+            # the agent tokens. This is crucial for avoiding causal confusion of
+            # the world model". La mascara es ASIMETRICA:
+            #   agente   -> todo        permitido (necesita ver la imagen)
+            #   no-agente-> agente      prohibido (evita la confusion causal)
+            # Ni "wm_agent" (mezcla total) ni "wm_agent_isolated" (agente ciego)
+            # hacen esto: el primero permite el camino de vuelta, el segundo deja
+            # a la politica sin observacion. Este es el modo de las fases 2 y 3.
+            is_q_agent = (q_mod == int(Modality.AGENT))
+            is_k_agent = (k_mod == int(Modality.AGENT))
+            todo = torch.ones((S, S), dtype=torch.bool, device=device)
+            return torch.where(is_q_agent, todo, ~is_k_agent)
 
         if self.mode == "wm_agent_isolated":
             # non-agent tokens: can attend to everything EXCEPT agent tokens
@@ -261,11 +410,12 @@ class SpaceSelfAttentionModality(nn.Module):
 
 
 class TimeSelfAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float, latents_only: bool, n_latents: int):
+    def __init__(self, d_model: int, n_heads: int, dropout: float, latents_only: bool, n_latents: int,
+                 *, attn_kw: Optional[dict] = None):
         super().__init__()
         self.latents_only = bool(latents_only)
         self.n_latents = int(n_latents)
-        self.attn = MultiheadSelfAttention(d_model, n_heads, dropout=dropout)
+        self.attn = MultiheadSelfAttention(d_model, n_heads, dropout=dropout, **(attn_kw or {}))
 
     def forward(self, x_btSd: torch.Tensor) -> torch.Tensor:
         B, T, S, D = x_btSd.shape
@@ -297,17 +447,20 @@ class BlockCausalLayer(nn.Module):
         layer_index: int,
         time_every: int,
         latents_only_time: bool,
+        attn_kw: Optional[dict] = None,
     ):
         super().__init__()
         self.do_time = ((layer_index + 1) % time_every == 0)
 
         self.norm1 = RMSNorm(d_model)
-        self.space = SpaceSelfAttentionModality(d_model, n_heads, modality_ids, n_latents, space_mode, dropout)
+        self.space = SpaceSelfAttentionModality(d_model, n_heads, modality_ids, n_latents, space_mode, dropout,
+                                                attn_kw=attn_kw)
         self.drop1 = nn.Dropout(dropout)
 
         if self.do_time:
             self.norm2 = RMSNorm(d_model)
-            self.time = TimeSelfAttention(d_model, n_heads, dropout, latents_only_time, n_latents)
+            self.time = TimeSelfAttention(d_model, n_heads, dropout, latents_only_time, n_latents,
+                                          attn_kw=attn_kw)
             self.drop2 = nn.Dropout(dropout)
 
         self.norm3 = RMSNorm(d_model)
@@ -334,8 +487,10 @@ class BlockCausalTransformer(nn.Module):
         mlp_ratio: float,
         time_every: int,
         latents_only_time: bool,
+        attn_kw: Optional[dict] = None,
     ):
         super().__init__()
+        self.attn_kw = attn_kw
         self.layers = nn.ModuleList([
             BlockCausalLayer(
                 d_model=d_model, n_heads=n_heads, n_latents=n_latents,
@@ -343,6 +498,7 @@ class BlockCausalTransformer(nn.Module):
                 dropout=dropout, mlp_ratio=mlp_ratio,
                 layer_index=i, time_every=time_every,
                 latents_only_time=latents_only_time,
+                attn_kw=attn_kw,
             )
             for i in range(depth)
         ])
@@ -371,12 +527,16 @@ class Encoder(nn.Module):
         mae_p_min: float = 0.0,
         mae_p_max: float = 0.9,
         scale_pos_embeds: bool = True,
+        attn_kw: Optional[dict] = None,
     ):
         super().__init__()
         self.d_model = d_model
         self.n_latents = n_latents
         self.n_patches = n_patches
         self.scale_pos_embeds = scale_pos_embeds
+        # Con RoPE la posicion ya va dentro de la atencion: sumar ademas el
+        # sinusoidal aditivo la contaria dos veces.
+        self.use_rope = bool((attn_kw or {}).get('rope', False))
 
         self.patch_proj = nn.Linear(patch_dim, d_model)
         self.bottleneck_proj = nn.Linear(d_model, d_bottleneck)
@@ -390,6 +550,7 @@ class Encoder(nn.Module):
             space_mode="encoder",
             dropout=dropout, mlp_ratio=mlp_ratio,
             time_every=time_every, latents_only_time=latents_only_time,
+            attn_kw=attn_kw,
         )
         self.mae = MAEReplacer(d_model=d_model, p_min=mae_p_min, p_max=mae_p_max)
 
@@ -405,7 +566,8 @@ class Encoder(nn.Module):
 
         lat = self.latents.view(1, 1, self.n_latents, -1).expand(B, T, -1, -1)
         tokens = torch.cat([lat, proj_masked], dim=2)        # (B,T,S,D)
-        tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
+        if not self.use_rope:
+            tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
 
         enc = self.transformer(tokens)
         z = torch.tanh(self.bottleneck_proj(enc[:, :, :self.n_latents, :]))
@@ -428,11 +590,15 @@ class Decoder(nn.Module):
         time_every: int = 4,
         latents_only_time: bool = True,
         scale_pos_embeds: bool = True,
+        attn_kw: Optional[dict] = None,
     ):
         super().__init__()
         self.n_latents = n_latents
         self.n_patches = n_patches
         self.scale_pos_embeds = scale_pos_embeds
+        # Con RoPE la posicion ya va dentro de la atencion: sumar ademas el
+        # sinusoidal aditivo la contaria dos veces.
+        self.use_rope = bool((attn_kw or {}).get('rope', False))
 
         self.up_proj = nn.Linear(d_bottleneck, d_model)
         self.patch_queries = nn.Parameter(torch.empty(n_patches, d_model))
@@ -449,6 +615,7 @@ class Decoder(nn.Module):
             space_mode="decoder",
             dropout=dropout, mlp_ratio=mlp_ratio,
             time_every=time_every, latents_only_time=latents_only_time,
+            attn_kw=attn_kw,
         )
 
     def forward(self, z_btLd: torch.Tensor) -> torch.Tensor:
@@ -458,7 +625,8 @@ class Decoder(nn.Module):
         lat = torch.tanh(self.up_proj(z_btLd))                                   # (B,T,L,D)
         qry = self.patch_queries.view(1, 1, self.n_patches, -1).expand(B, T, -1, -1)
         tokens = torch.cat([lat, qry], dim=2)                                  # (B,T,S,D)
-        tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
+        if not self.use_rope:
+            tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
 
         x = self.transformer(tokens)
         x_p = x[:, :, L:, :]
@@ -521,6 +689,7 @@ class DiscreteEncoder(nn.Module):
         mae_p_max: float = 0.9,
         temperature: float = 1.0,
         scale_pos_embeds: bool = True,
+        attn_kw: Optional[dict] = None,
     ):
         super().__init__()
         self.d_model      = d_model
@@ -529,6 +698,9 @@ class DiscreteEncoder(nn.Module):
         self.d_bottleneck = n_categories   # alias so downstream readers work
         self.temperature  = temperature
         self.scale_pos_embeds = scale_pos_embeds
+        # Con RoPE la posicion ya va dentro de la atencion: sumar ademas el
+        # sinusoidal aditivo la contaria dos veces.
+        self.use_rope = bool((attn_kw or {}).get('rope', False))
 
         self.patch_proj     = nn.Linear(patch_dim, d_model)
         # Named bottleneck_proj (same as Encoder) for state-dict compatibility
@@ -543,6 +715,7 @@ class DiscreteEncoder(nn.Module):
             space_mode="encoder",
             dropout=dropout, mlp_ratio=mlp_ratio,
             time_every=time_every, latents_only_time=latents_only_time,
+            attn_kw=attn_kw,
         )
         self.mae = MAEReplacer(d_model=d_model, p_min=mae_p_min, p_max=mae_p_max)
 
@@ -558,7 +731,8 @@ class DiscreteEncoder(nn.Module):
 
         lat    = self.latents.view(1, 1, self.n_latents, -1).expand(B, T, -1, -1)
         tokens = torch.cat([lat, proj_masked], dim=2)
-        tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
+        if not self.use_rope:
+            tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
 
         enc    = self.transformer(tokens)
         logits = self.bottleneck_proj(enc[:, :, :self.n_latents, :])   # (B,T,L,C)
@@ -704,8 +878,9 @@ class Dynamics(nn.Module):
         dropout: float = 0.0,
         mlp_ratio: float = 4.0,
         time_every: int = 4,
-        space_mode: str = "wm_agent_isolated",  # or "wm_agent"
+        space_mode: str = "wm_agent_isolated",  # fases 2-3: usar "wm_agent_read"
         scale_pos_embeds: bool = True,
+        attn_kw: Optional[dict] = None,
         action_dim: int = 16,
     ):
         super().__init__()
@@ -717,6 +892,9 @@ class Dynamics(nn.Module):
         self.n_agent = int(n_agent)
         self.k_max = int(k_max)
         self.scale_pos_embeds = scale_pos_embeds
+        # Con RoPE la posicion ya va dentro de la atencion: sumar ademas el
+        # sinusoidal aditivo la contaria dos veces.
+        self.use_rope = bool((attn_kw or {}).get('rope', False))
 
         self.spatial_proj = nn.Linear(self.d_spatial, self.d_model)
         self.register_tokens = nn.Parameter(torch.empty(self.n_register, self.d_model))
@@ -756,6 +934,7 @@ class Dynamics(nn.Module):
             mlp_ratio=float(mlp_ratio),
             time_every=int(time_every),
             latents_only_time=False,
+            attn_kw=attn_kw,
         )
 
         self.flow_x_head = nn.Linear(self.d_model, self.d_spatial)
@@ -796,7 +975,8 @@ class Dynamics(nn.Module):
             toks = [action_tokens, sig_tok, step_tok, spatial_tokens, reg]
 
         tokens = torch.cat(toks, dim=2)  # (B,T,S,D)
-        tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
+        if not self.use_rope:
+            tokens = add_sinusoidal_positions(tokens, self.scale_pos_embeds)
         x = self.transformer(tokens)
 
         spatial_out = x[:, :, self.spatial_slice, :]

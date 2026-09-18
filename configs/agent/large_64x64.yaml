@@ -14,8 +14,9 @@ mlp_ratio: 4.0
 time_every: 4
 n_register: 8
 n_agent: 1
-space_mode: wm_agent_isolated
+space_mode: wm_agent_read   # fases 2-3: el agente DEBE ver la imagen (paper 3.3)
 k_max: 8
+tau_ctx: 0.9              # nivel de senal del contexto en inferencia (paper p.6)
 
 # ---- Task conditioning (must match Phase-2) ----------------------------------
 use_task_ids: false
@@ -52,3 +53,9 @@ grad_clip: 10.0
 eval_every: 5000
 eval_n_episodes: 1
 eval_episode_len: 500
+
+# --- transformer eficiente (Dreamer 4, seccion 3.4) ---
+qk_norm: true             # RMSNorm sobre q,k: "to increase training stability"
+soft_cap: 50.0            # acotado tanh de logits; 0 lo desactiva y reactiva flash-attn
+use_rope: true            # RoPE en vez de sinusoidal aditivo
+n_kv_heads: null          # GQA: p.ej. n_heads/4. null = sin GQA

@@ -26,6 +26,7 @@ import pytorch_lightning as pl
 from omegaconf import DictConfig
 
 from model import (
+    build_attn_kw,
     Dynamics,
     TaskEmbedder,
     temporal_patchify,
@@ -119,6 +120,7 @@ class FinetuneLightningModule(pl.LightningModule):
             mlp_ratio=ft.mlp_ratio,
             time_every=ft.time_every,
             space_mode=ft.space_mode,
+            attn_kw=build_attn_kw(ft),
         )
 
         # Optionally initialise from a Phase-1 dynamics checkpoint

@@ -8,6 +8,15 @@ Implementación del pipeline completo de Dreamer V4 sobre DMControl, usando PyTo
 Extiende la referencia oficial con las Fases 2 y 3 (agent finetuning + imagination training),
 el ciclo de recolección recursivo (self-play) y soporte para tokenizador discreto.
 
+> **Nota sobre las descripciones de fase.** Hasta el 18-sep este README llamaba
+> "VQVAE-like" a la Fase 1a y "RSSM" a la 1b. Las dos etiquetas eran falsas y
+> describían arquitecturas que el repo nunca tuvo: la 1a es el masked autoencoder
+> de la §3.1 con cuello continuo y `tanh` (`src/model.py`, `Encoder.forward`), y
+> la 1b es el transformer block-causal de la §3.2 entrenado con shortcut forcing
+> (`src/losses.py`, `dynamics_pretrain_loss`). No hay ningún RSSM en el código.
+> El tokenizador discreto (`DiscreteTokenizer`) existe, es estilo DreamerV3 y es
+> **opcional**: el default de `configs/run.yaml` es el continuo.
+
 ---
 
 ## Instalación
@@ -41,10 +50,18 @@ export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
 
 Cinco fases que se ejecutan en orden. Las Fases 1a y 1b tienen checkpoints preentrenados disponibles en [HuggingFace](https://huggingface.co/nicklashansen/dreamer4).
 
+> **Compatibilidad con checkpoints anteriores.** Los configs activan ahora las
+> piezas del transformer eficiente de la §3.4 (`qk_norm`, `soft_cap`, `use_rope`),
+> que cambian la arquitectura: un checkpoint entrenado antes **no** carga con
+> ellas puestas. Para reusarlo, pon en su config `qk_norm: false`,
+> `soft_cap: 0`, `use_rope: false` y deja `n_kv_heads: null`; así el modelo es
+> exactamente el de antes, incluido el nombre fusionado `qkv` de las
+> proyecciones. Para entrenar de cero, déjalas como vienen.
+
 ```
 Phase 0  →  scripts/pipeline/launch_phase0_dist.py      # recolección de episodios
-Phase 1a →  scripts/pipeline/train_phase1a_tokenizer.py # tokenizador de frames (VQVAE-like)
-Phase 1b →  scripts/pipeline/train_phase1b_dynamics.py  # world model (RSSM)
+Phase 1a →  scripts/pipeline/train_phase1a_tokenizer.py # tokenizador causal (masked autoencoder, cuello tanh)
+Phase 1b →  scripts/pipeline/train_phase1b_dynamics.py  # dinamica interactiva (transformer block-causal, shortcut forcing)
 Phase 2  →  scripts/pipeline/train_phase2_finetuning.py # BC + reward head
 Phase 3  →  scripts/pipeline/train_phase3_imagination.py # RL en imaginación (PMPO)
 ```

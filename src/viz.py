@@ -87,7 +87,17 @@ def sample_one_timestep_packed(
     sched: Dict[str, Any],
     actions: Optional[torch.Tensor] = None,
     act_mask: Optional[torch.Tensor] = None,
+    tau_ctx: float = 0.9,
 ) -> torch.Tensor:
+    """
+    `tau_ctx` es el nivel de SENAL del contexto pasado (1.0 = limpio, 0.0 = ruido
+    puro). Dreamer 4, p.6: "We slightly corrupt the past inputs to the dynamics
+    model to [...] make the model robust to small imperfections in its
+    generations." El codigo ya declaraba el contexto como ligeramente sucio
+    (indice k_max-1), pero le pasaba valores LIMPIOS: el modelo recibia una
+    condicion que no se correspondia con su entrada. Aqui se ensucian los
+    valores para que coincidan con el indice declarado.
+    """
     import math
     device = past_packed.device
     dtype  = past_packed.dtype
@@ -105,7 +115,16 @@ def sample_one_timestep_packed(
     emax = int(round(math.log2(k_max)))
     step_idxs_full   = torch.full((B, t + 1), emax, device=device, dtype=torch.long)
     step_idxs_full[:, -1] = e
-    signal_idxs_full = torch.full((B, t + 1), k_max - 1, device=device, dtype=torch.long)
+
+    # Contexto: indice de senal y valores corrompidos AL MISMO nivel.
+    ctx_idx = int(min(max(round(tau_ctx * k_max), 0), k_max))
+    tau_ctx_grid = ctx_idx / float(k_max)
+    signal_idxs_full = torch.full((B, t + 1), ctx_idx, device=device, dtype=torch.long)
+
+    if tau_ctx_grid < 1.0:
+        ruido = torch.randn_like(past_packed)
+        past_packed = (tau_ctx_grid * past_packed.float()
+                       + (1.0 - tau_ctx_grid) * ruido.float()).to(dtype)
 
     if act_mask is not None and act_mask.dim() == 1:
         act_mask = act_mask.view(1, 1, -1)

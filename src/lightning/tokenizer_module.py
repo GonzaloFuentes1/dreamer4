@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 from omegaconf import DictConfig
 
 from model import (
+    build_attn_kw,
     Encoder,
     Decoder,
     Tokenizer,
@@ -61,6 +62,7 @@ class TokenizerLightningModule(pl.LightningModule):
             time_every=tc.time_every,
             latents_only_time=tc.latents_only_time,
             scale_pos_embeds=bool(tc.get("scale_pos_embeds", True)),
+            attn_kw=build_attn_kw(tc),
         )
 
         if self._discrete:
@@ -80,6 +82,7 @@ class TokenizerLightningModule(pl.LightningModule):
                 mae_p_max=tc.mae_p_max,
                 temperature=float(tc.get("temperature", 1.0)),
                 scale_pos_embeds=bool(tc.get("scale_pos_embeds", True)),
+                attn_kw=build_attn_kw(tc),
             )
             self.model = DiscreteTokenizer(enc, dec)
         else:
@@ -98,6 +101,7 @@ class TokenizerLightningModule(pl.LightningModule):
                 mae_p_min=tc.mae_p_min,
                 mae_p_max=tc.mae_p_max,
                 scale_pos_embeds=bool(tc.get("scale_pos_embeds", True)),
+                attn_kw=build_attn_kw(tc),
             )
             self.model = Tokenizer(enc, dec)
 
@@ -253,3 +257,5 @@ class TokenizerLightningModule(pl.LightningModule):
     def configure_gradient_clipping(self, optimizer, gradient_clip_val=None, gradient_clip_algorithm=None):
         clip = float(self.cfg.tokenizer.get("grad_clip", 1.0))
         self.clip_gradients(optimizer, gradient_clip_val=clip, gradient_clip_algorithm="norm")
+
+

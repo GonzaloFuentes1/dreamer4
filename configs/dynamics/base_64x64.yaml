@@ -1,7 +1,7 @@
 # configs/dynamics/base_64x64.yaml
 # Dynamics base para 64×64 — ~80M parámetros.
 # Tokenizador: base_64x64 (continuo, n_latents=16) → n_spatial=8, d_spatial=64.
-# Tokenizador: discrete_base_64x64 (n_latents=32) con packing=2 → n_spatial=16, d_spatial=64.
+# Tokenizador por defecto: base_64x64 (continuo). Con discrete_base_64x64 (n_latents=32) y packing=2 -> n_spatial=16, d_spatial=64.
 
 tokenizer_ckpt: ???
 packing_factor: 2
@@ -41,3 +41,9 @@ eval_ctx: 8
 eval_horizon: 16
 eval_schedule: shortcut
 eval_d: 0.25
+
+# --- transformer eficiente (Dreamer 4, seccion 3.4) ---
+qk_norm: true             # RMSNorm sobre q,k: "to increase training stability"
+soft_cap: 50.0            # acotado tanh de logits; 0 lo desactiva y reactiva flash-attn
+use_rope: true            # RoPE en vez de sinusoidal aditivo
+n_kv_heads: null          # GQA: p.ej. n_heads/4. null = sin GQA

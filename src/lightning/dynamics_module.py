@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 from omegaconf import DictConfig
 
 from model import (
+    build_attn_kw,
     Dynamics,
     temporal_patchify,
     pack_bottleneck_to_spatial,
@@ -104,6 +105,7 @@ class DynamicsLightningModule(pl.LightningModule):
                 time_every=dc.time_every,
                 space_mode=dc.space_mode,
                 scale_pos_embeds=bool(dc.get("scale_pos_embeds", False)),
+                attn_kw=build_attn_kw(dc),
             )
             if self.cfg.get("compile", False):
                 self.dyn = torch.compile(self.dyn)
@@ -227,3 +229,5 @@ class DynamicsLightningModule(pl.LightningModule):
         state = checkpoint.get("state_dict", {})
         if "rms_wm.sq" not in state:
             state["rms_wm.sq"] = torch.ones(1)
+
+
