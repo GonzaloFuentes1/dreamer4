@@ -23,12 +23,11 @@ flowchart TD
     subgraph DATA["📦 Datos (entran al pipeline)"]
         TJSON["tasks.json\n{action_dim, text_embedding}"]
         FS["HDF5EpisodeDataset (mode=frames)\nsrc/hdf5_episode_dataset.py"]
-        WMD["HDF5EpisodeDataset (mode=episodes)\nsrc/hdf5_episode_dataset.py\n{obs, act, rew, lang_emb}"]
+        WMD["HDF5EpisodeDataset (mode=episodes)\nsrc/hdf5_episode_dataset.py\n{frames, action, reward}"]
         FDM["FrameDataModule\nlightning/frame_datamodule.py"]
         WMDM["WMDataModule\nlightning/wm_datamodule.py"]
         H5 --> FS --> FDM
         H5 --> WMD --> WMDM
-        TJSON --> WMD
     end
 
     subgraph P1A["Fase 1a — Tokenizer"]
