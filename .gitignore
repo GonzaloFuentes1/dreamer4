@@ -11,7 +11,7 @@ runs/
 # Debug / generated frames in docs
 docs/debug_frames/
 
-# PDF papers (large binary, tracked as text via docs/paper.md)
+# PDF papers (large binary; the paper is at https://arxiv.org/abs/2509.24527)
 *.pdf
 
 # Training data (large binary files)

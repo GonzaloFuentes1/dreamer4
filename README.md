@@ -1,33 +1,40 @@
 # dreamer4 — PyTorch Lightning
 
-> ⚠️ **Implementación no oficial.** Este repositorio es una re-implementación independiente basada en el paper
-> [Training Agents Inside of Scalable World Models](https://arxiv.org/abs/2509.24527) (Hafner, Yan, Lillicrap, 2025).
-> El repositorio oficial de los autores es [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4).
+English | [Español](README.es.md)
 
-Implementación del pipeline completo de Dreamer V4 sobre DMControl, usando PyTorch Lightning + Hydra.
-Extiende la referencia oficial con las Fases 2 y 3 (agent finetuning + imagination training),
-el ciclo de recolección recursivo (self-play) y soporte para tokenizador discreto.
+> **Unofficial, independent re-implementation.** This repository is not affiliated with the authors of the paper
+> [Training Agents Inside of Scalable World Models](https://arxiv.org/abs/2509.24527) (Hafner, Yan, Lillicrap, 2025;
+> arXiv:2509.24527). It does not claim to reproduce the results reported in the paper, and no numbers from the
+> paper are reproduced here. Refer to the paper for the method and its reported results.
+
+Implementation of the full Dreamer 4 pipeline on DMControl, using PyTorch Lightning + Hydra.
+It builds on the structure of [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4), an MIT-licensed,
+also unofficial, PyTorch implementation that provides tokenizer and dynamics training (see
+[Acknowledgements](#acknowledgements)), and adds Phases 2 and 3 (agent finetuning + imagination training),
+the recursive collection cycle (self-play) and support for a discrete tokenizer.
+
+The paper is not redistributed in this repository; it is available at <https://arxiv.org/abs/2509.24527>.
 
 ---
 
-## Instalación
+## Installation
 
 ```bash
-# Requiere uv (https://github.com/astral-sh/uv)
+# Requires uv (https://github.com/astral-sh/uv)
 uv venv .venv --python 3.10
 source .venv/bin/activate
 uv pip install -e .
 ```
 
-Crea un `.env` en la raíz del repo con tus credenciales:
+Create a `.env` file at the repo root with your credentials:
 
 ```bash
-export WANDB_API_KEY=tu_clave_aqui
+export WANDB_API_KEY=your_key_here
 ```
 
-### Entorno headless (cluster / SLURM)
+### Headless environment (cluster / SLURM)
 
-El rendering headless usa EGL. Las variables necesarias las configura automáticamente `_pipeline_lib.sh`:
+Headless rendering uses EGL. The required variables are set automatically by `_pipeline_lib.sh`:
 
 ```bash
 export MUJOCO_GL=egl
@@ -37,170 +44,204 @@ export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
 
 ---
 
-## Pipeline completo
+## Full pipeline
 
-Cinco fases que se ejecutan en orden. Las Fases 1a y 1b tienen checkpoints preentrenados disponibles en [HuggingFace](https://huggingface.co/nicklashansen/dreamer4).
+Five phases that run in order.
 
 ```
-Phase 0  →  scripts/pipeline/launch_phase0_dist.py      # recolección de episodios
-Phase 1a →  scripts/pipeline/train_phase1a_tokenizer.py # tokenizador de frames (VQVAE-like)
-Phase 1b →  scripts/pipeline/train_phase1b_dynamics.py  # world model (RSSM)
+Phase 0  →  scripts/pipeline/launch_phase0_dist.py      # episode collection
+Phase 1a →  scripts/pipeline/train_phase1a_tokenizer.py # frame tokenizer (masked-autoencoding transformer with tanh bottleneck; discrete variant available)
+Phase 1b →  scripts/pipeline/train_phase1b_dynamics.py  # world model (block-causal transformer, shortcut forcing)
 Phase 2  →  scripts/pipeline/train_phase2_finetuning.py # BC + reward head
-Phase 3  →  scripts/pipeline/train_phase3_imagination.py # RL en imaginación (PMPO)
+Phase 3  →  scripts/pipeline/train_phase3_imagination.py # RL in imagination (PMPO)
 ```
 
-El entrenamiento acumula datos de todos los ciclos anteriores: cada ciclo `k` entrena sobre `cycle0 + cycle1 + … + cycleK`.
+Training accumulates data from all previous cycles: cycle `k` trains on `cycle0 + cycle1 + … + cycleK`.
+
+Besides the shell pipelines described below, `scripts/run.py` is a Python coordinator that reads
+`configs/run.yaml` and runs the same phases (for example `python scripts/run.py profile=smoke_test`), and
+`scripts/dreamer.py` is a small CLI to inspect datasets and runs.
 
 ---
 
-## Modos de ejecución
+## Execution modes
 
-### Modo 1 — Desde cero (sin datos previos)
+### Mode 1 — From scratch (no prior data)
 
-El pipeline completo parte de política random en el ciclo 0 y va mejorando el agente ciclo a ciclo.
+The full pipeline starts from a random policy in cycle 0 and improves the agent cycle after cycle.
 
 ```bash
-# 64×64, 1 GPU, 30 ciclos
+# 64×64, 1 GPU, 30 cycles
 RES=64 srun --nodes=1 --ntasks=1 --gpus=1 \
     --cpus-per-task=64 --mem=128G --time=24:00:00 \
     bash scripts/pipeline/run_cycles.sh
 
-# 128×128, 3 GPUs, 30 ciclos
+# 128×128, 3 GPUs, 30 cycles
 RES=128 srun --nodes=1 --ntasks=1 --gpus=3 \
     --cpus-per-task=48 --mem=256G --time=72:00:00 \
     bash scripts/pipeline/run_cycles.sh
 ```
 
-Variables de entorno opcionales para `run_cycles.sh`:
+Optional environment variables for `run_cycles.sh`:
 
-| Variable | Default | Descripción |
+| Variable | Default | Description |
 |---|---|---|
-| `RES` | `64` | Resolución: `64` o `128` |
-| `K` | `30` | Número de ciclos |
-| `RUN_TAG` | `active_64x64` | Nombre del run (carpeta en `./runs/`) |
-| `TASKS` | 5 tareas DMC | Lista separada por comas |
-| `START_FROM_DYNAMICS_CYCLE0` | `false` | Arrancar desde tokenizer+datos externos |
-| `SOURCE_RUN_TAG` | — | Run fuente (requiere la opción anterior) |
-| `DEVICES` | auto-detect | Número de GPUs |
+| `RES` | `64` | Resolution: `64` or `128` |
+| `K` | `30` | Number of cycles |
+| `RUN_TAG` | `active_64x64` | Run name (folder in `./runs/`) |
+| `TASKS` | 5 DMC tasks | Comma-separated list |
+| `START_FROM_DYNAMICS_CYCLE0` | `false` | Start from an external tokenizer + data |
+| `SOURCE_RUN_TAG` | — | Source run (requires the previous option) |
+| `DEVICES` | auto-detect | Number of GPUs |
 
-### Modo 2 — Desde datos preentrenados (HuggingFace)
+### Mode 2 — From pretrained data (HuggingFace)
 
-Ciclo 0 usa datos descargados de HF sin colección. Ciclos posteriores colectan con el agente aprendido.
+Cycle 0 uses data downloaded from HuggingFace, without collection. Later cycles collect with the learned agent.
+The dataset is the one published by [nicklashansen/dreamer4](https://huggingface.co/datasets/nicklashansen/dreamer4)
+and is fetched with `scripts/download_pretrain_data.py`.
 
 ```bash
-# Convertir frames a la resolución deseada (solo una vez)
+# Convert frames to the desired resolution (only once)
 python scripts/convert_frames_to_res.py \
     --input  ./data/cycle0-pretrained/frames \
     --output ./data/pretrained-64x64/frames \
     --size 64 --workers 32
 
-# Crear symlink de demos (los demos ya están en la resolución correcta)
+# Create a symlink for the demos (the demos are already at the right resolution)
 ln -s ./data/cycle0-pretrained/demos ./data/pretrained-64x64/demos
 
-# Lanzar pipeline
+# Launch the pipeline
 RES=64 BASE_DATA_ROOT=./data/pretrained-64x64 \
     srun --gpus=4 --cpus-per-task=64 --mem=384G --time=72:00:00 \
     bash scripts/pipeline/run_cycles_pretrain.sh
 ```
 
-Variables adicionales para `run_cycles_pretrain.sh`:
+Training reads one `.h5` file per task (see [Data format](#data-format)). Data in the legacy `.pt` layout (as written
+by `scripts/download_pretrain_data.py` and handled by `scripts/convert_frames_to_res.py`) must be converted with
+`scripts/convert_pt_to_hdf5.py` (`--data`, `--out`) before training.
 
-| Variable | Default | Descripción |
+Additional variables for `run_cycles_pretrain.sh`:
+
+| Variable | Default | Description |
 |---|---|---|
-| `BASE_DATA_ROOT` | `./data/cycle0-pretrained` | Directorio con datos del ciclo 0 (HF) |
-| `RUN_TAG` | `pt_active` | Nombre del run |
-| `K` | `10` | Número de ciclos |
+| `BASE_DATA_ROOT` | `./data/cycle0-pretrained` | Directory with the cycle 0 data (HF) |
+| `RUN_TAG` | `pt_active` | Run name |
+| `K` | `10` | Number of cycles |
 
 ---
 
-## Preprocesamiento de frames
+## Frame preprocessing
 
-Los frames deben estar en la resolución del modelo **antes** del entrenamiento. El entrenamiento no hace resize en tiempo de ejecución.
+Frames must be at the model resolution **before** training. Training does not resize at run time.
 
 ```bash
 python scripts/convert_frames_to_res.py \
-    --input  <ruta/frames/originales> \
-    --output <ruta/frames/nuevos> \
-    --size   64          # o 128
-    --workers 32         # procesos en paralelo
+    --input  <path/to/original/frames> \
+    --output <path/to/new/frames> \
+    --size   64          # or 128
+    --workers 32         # parallel processes
 ```
 
-El script preserva la estructura de subdirectorios y hace saves atómicos (`.tmp` → rename).
+The script preserves the subdirectory structure and saves atomically (`.tmp` → rename).
 
 ---
 
-## Estructura del proyecto
+## Project structure
 
 ```
 dreamer4/
 ├── scripts/pipeline/
-│   ├── run_cycles.sh                   # Pipeline activo (desde cero)
-│   ├── run_cycles_pretrain.sh          # Pipeline desde datos HF
-│   ├── _pipeline_lib.sh                # Funciones compartidas (setup, steps, eval)
-│   ├── launch_phase0_dist.py           # Phase 0 — colección distribuida
-│   ├── train_phase1a_tokenizer.py      # Phase 1a — tokenizer
-│   ├── train_phase1b_dynamics.py       # Phase 1b — world model
-│   ├── train_phase2_finetuning.py      # Phase 2 — BC + reward
-│   ├── train_phase3_imagination.py     # Phase 3 — RL en imaginación
-│   └── train_utils.py                  # Helpers compartidos (trainer, logger, ckpt)
+│   ├── run_cycles.sh                    # Active pipeline (from scratch)
+│   ├── run_cycles_pretrain.sh           # Pipeline from HF data
+│   ├── run_cycles_discrete_base.sh      # Pipeline with the discrete tokenizer (64×64)
+│   ├── _pipeline_lib.sh                 # Shared functions (setup, steps, eval)
+│   ├── launch_phase0_dist.py            # Phase 0 — distributed collection
+│   ├── train_phase0_collect_episodes.py # Phase 0 — per-task collection worker
+│   ├── train_phase1a_tokenizer.py       # Phase 1a — tokenizer
+│   ├── train_phase1b_dynamics.py        # Phase 1b — world model
+│   ├── train_phase2_finetuning.py       # Phase 2 — BC + reward
+│   ├── train_phase3_imagination.py      # Phase 3 — RL in imagination
+│   └── train_utils.py                   # Shared helpers (trainer, logger, ckpt)
 │
 ├── scripts/
-│   └── convert_frames_to_res.py        # Conversión offline de resolución
+│   ├── run.py                           # Python coordinator for the full pipeline
+│   ├── dreamer.py                       # CLI to inspect datasets and runs
+│   ├── convert_frames_to_res.py         # Offline resolution conversion
+│   ├── convert_pt_to_hdf5.py            # Legacy .pt → HDF5 conversion
+│   ├── download_pretrain_data.py        # Download the HF dataset
+│   └── generate_task_embeddings.py      # CLIP text embeddings for tasks.json
 │
 ├── configs/
-│   ├── collect/base.yaml               # Config Phase 0
-│   ├── tokenizer/base_64x64.yaml       # Config Phase 1a (64×64)
-│   ├── tokenizer/base_128x128.yaml     # Config Phase 1a (128×128)
-│   ├── dynamics/base_64x64.yaml        # Config Phase 1b
-│   ├── finetune/base_64x64.yaml        # Config Phase 2
-│   ├── agent/base_64x64.yaml           # Config Phase 3
+│   ├── collect/base.yaml                # Phase 0 config
+│   ├── tokenizer/base_64x64.yaml        # Phase 1a config (64×64)
+│   ├── tokenizer/base_128x128.yaml      # Phase 1a config (128×128)
+│   ├── dynamics/base_64x64.yaml         # Phase 1b config
+│   ├── finetune/base_64x64.yaml         # Phase 2 config
+│   ├── agent/base_64x64.yaml            # Phase 3 config
+│   ├── profiles/smoke_test.yaml         # Profile for scripts/run.py
 │   └── data/
-│       ├── local.yaml                  # Config de datos local
-│       └── cluster.yaml                # Config de datos en cluster
+│       ├── local.yaml                   # Local data config
+│       └── cluster.yaml                 # Cluster data config
 │
 ├── src/
-│   ├── model.py                        # Tokenizer, Dynamics, TaskEmbedder
-│   ├── agent.py                        # PolicyHead, RewardHead, ValueHead
-│   ├── distributions.py                # SymExp TwoHot (eq.10), PMPO (eq.11)
-│   ├── losses.py                       # dynamics_pretrain_loss (eq.7)
-│   ├── wm_dataset.py                   # WMDataset (acciones + frames)
-│   ├── sharded_frame_dataset.py        # ShardedFrameDataset (frames por shard)
-│   ├── task_set.py                     # TASK_SET — 18 tareas DMControl
+│   ├── model.py                         # Tokenizer, Dynamics, TaskEmbedder
+│   ├── agent.py                         # PolicyHead, RewardHead, ValueHead
+│   ├── distributions.py                 # symlog/symexp, SymExp TwoHot (eq.10), PMPO (eq.11)
+│   ├── losses.py                        # dynamics_pretrain_loss (eq.7), tau schedules
+│   ├── loss_norm.py                     # RunningRMS loss normalisation
+│   ├── hdf5_episode_dataset.py          # HDF5EpisodeWriter / HDF5EpisodeDataset
+│   ├── goal_dataset.py                  # GoalDataset (goal-conditioned sampling)
+│   ├── checkpoint_utils.py              # Frozen tokenizer loading
+│   ├── viz.py                           # Sampling and visualisation helpers
+│   ├── task_set.py                      # TASK_SET — 18 DMControl tasks
 │   ├── envs/
-│   │   └── torchrl_wrappers.py         # ParallelEnv + DMControlEnv (EGL)
+│   │   └── torchrl_wrappers.py          # ParallelEnv + DMControlEnv (EGL)
+│   ├── policies/
+│   │   └── exploration.py               # Random and learned-agent collection policies
 │   └── lightning/
-│       ├── tokenizer_module.py         # Phase 1a
-│       ├── frame_datamodule.py         # DataModule para tokenizer
-│       ├── dynamics_module.py          # Phase 1b
-│       ├── wm_datamodule.py            # DataModule para dynamics/finetune/agent
-│       ├── finetune_module.py          # Phase 2
-│       └── agent_module.py             # Phase 3
+│       ├── tokenizer_module.py          # Phase 1a
+│       ├── frame_datamodule.py          # DataModule for the tokenizer
+│       ├── dynamics_module.py           # Phase 1b
+│       ├── wm_datamodule.py             # DataModule for dynamics/finetune/agent
+│       ├── finetune_module.py           # Phase 2
+│       ├── agent_module.py              # Phase 3
+│       └── callbacks.py                 # Visualisation and evaluation callbacks
 │
-├── tasks.json                          # action_dim + CLIP embeddings (234 tareas)
-└── .env                                # WANDB_API_KEY (no commitear)
+├── tasks.json                           # action_dim + CLIP embeddings (234 tasks)
+└── .env                                 # WANDB_API_KEY (do not commit)
 ```
 
 ---
 
-## Formato de datos
+## Data format
+
+Each task is stored in a single HDF5 file, written incrementally by Phase 0 (SWMR, crash-safe) and read by
+`HDF5EpisodeDataset` (`src/hdf5_episode_dataset.py`):
 
 ```
-<data_root>/
-├── demos/
-│   └── <task>.pt       # dict con keys: obs, action, reward, done  [T, ...]
-└── frames/
-    └── <task>/
-        └── <task>_shard<N>.pt   # tensor uint8 [S, T, C, H, W]
+<data_dir>/
+└── <task>.h5
+    ├── pixels     (N, 3, H, W)  uint8     # raw frames
+    ├── action     (N, A)        float32
+    ├── reward     (N,)          float32
+    ├── episode    (N,)          int64     # episode id per step
+    ├── ep_len     (E,)          int64     # length of each episode
+    └── ep_offset  (E,)          int64     # global start index of each episode
 ```
 
-- Los demos contienen acciones y recompensas; los frames son las observaciones visuales en uint8.
-- Los shards de frames permiten carga eficiente y sampling distribuido.
+- Training is pointed at the directories holding the `.h5` files with `data.data_dirs` (explicit list) or
+  `data.data_root` (a directory with `.h5` files, or with cycle subdirectories that contain them).
+- The dataset has two modes: `frames` (frame sequences without episode alignment, used for the tokenizer) and
+  `episodes` (frames, actions and rewards aligned by episode, used for dynamics / finetune / agent).
+- The legacy layout (`demos/<task>.pt` with `episode, action, reward`, and `frames/<task>/<task>_shard<N>.pt` with
+  `uint8` tensors) is what `scripts/download_pretrain_data.py` writes and what `scripts/convert_frames_to_res.py`
+  expects; convert it with `scripts/convert_pt_to_hdf5.py`.
 
 ---
 
-## Tareas soportadas
+## Supported tasks
 
-18 tareas de control continuo de DMControl en `TASK_SET` (ver `src/task_set.py`):
+18 DMControl continuous-control tasks in `TASK_SET` (see `src/task_set.py`):
 
 ```
 walker-{stand,walk,run}    hopper-{stand,hop}         reacher-{easy,hard}
@@ -209,11 +250,37 @@ cup-catch                  finger-{spin,turn-easy,turn-hard}
 acrobot-swingup            pendulum-swingup
 ```
 
-`tasks.json` contiene 234 tareas con embeddings CLIP y dimensiones de acción.
+`tasks.json` contains 234 tasks with CLIP embeddings and action dimensions.
 
 ---
 
-## Citas
+## Status and scope
+
+- This is research code under development. No results are reported in this repository, and none of the paper's
+  results are claimed to be reproduced.
+- The paper applies Dreamer 4 to Minecraft; this repository targets DMControl (continuous actions), so it is not
+  expected to match the paper's setup or numbers.
+- For hyperparameters and architecture details, rely on the code and configs in this repository rather than on
+  assumptions taken from the paper.
+
+---
+
+## Acknowledgements
+
+- **Paper.** The method is from Hafner, Yan and Lillicrap, *Training Agents Inside of Scalable World Models*
+  (arXiv:2509.24527). Credit for the algorithm belongs to the paper's authors.
+- **[nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4)** (MIT license), an unofficial PyTorch
+  implementation of Dreamer 4 by Nicklas Hansen. This repository follows its overall layout (tokenizer and
+  dynamics training on multi-task DMControl; for example `model.py`, `task_set.py` and `tasks.json`). The comments in
+  `configs/tokenizer/base_128x128.yaml` and `configs/dynamics/base_128x128.yaml` state that those configs are
+  aligned with its DMControl configuration, and `scripts/download_pretrain_data.py` downloads the dataset it
+  publishes on HuggingFace, which is subject to the terms stated there.
+
+---
+
+## Citation
+
+If you use the method, cite the paper:
 
 ```bibtex
 @misc{Hafner2025TrainingAgents,
@@ -222,8 +289,13 @@ acrobot-swingup            pendulum-swingup
     year={2025},
     eprint={2509.24527},
     archivePrefix={arXiv},
+    url={https://arxiv.org/abs/2509.24527},
 }
+```
 
+If you use the upstream PyTorch implementation this repository builds on:
+
+```bibtex
 @misc{Hansen2026Dreamer4PyTorch,
     title={Dreamer 4 in PyTorch},
     author={Nicklas Hansen},

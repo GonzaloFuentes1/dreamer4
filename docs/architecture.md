@@ -10,29 +10,24 @@
 flowchart TD
     subgraph P0["Phase 0 — Colección de episodios (ciclo N)"]
         COL["scripts/pipeline/train_phase0_collect_episodes.py\ncollect_phase0.yaml"]
-        ENV["DMControl\n(30 tareas)"]
+        ENV["DMControl\n(TASK_SET, 18 tareas)"]
         RPOL["Política random\n(bootstrap, ciclo 0)"]
         APOL["Política entrenada\n(agent.ckpt, ciclos ≥1)"]
-        DEMOS["demos/{task}.pt\n{episode, action, reward}"]
-        SHARDS["frames/{task}/*_shard*.pt\n{frames: uint8}"]
-        TJSON["tasks.json\n{action_dim, text_embedding}"]
+        H5["{task}.h5 (HDF5EpisodeWriter)\n{pixels, action, reward,\nepisode, ep_len, ep_offset}"]
         COL --> ENV
         RPOL --> COL
         APOL -. "ciclos ≥1" .-> COL
-        ENV --> DEMOS
-        ENV --> SHARDS
-        ENV --> TJSON
+        ENV --> H5
     end
 
     subgraph DATA["📦 Datos (entran al pipeline)"]
-        FS["ShardedFrameDataset\nsrc/sharded_frame_dataset.py"]
-        WMD["WMDataset\nsrc/wm_dataset.py\n{obs, act, rew, lang_emb}"]
+        TJSON["tasks.json\n{action_dim, text_embedding}"]
+        FS["HDF5EpisodeDataset (mode=frames)\nsrc/hdf5_episode_dataset.py"]
+        WMD["HDF5EpisodeDataset (mode=episodes)\nsrc/hdf5_episode_dataset.py\n{frames, action, reward}"]
         FDM["FrameDataModule\nlightning/frame_datamodule.py"]
         WMDM["WMDataModule\nlightning/wm_datamodule.py"]
-        SHARDS --> FS --> FDM
-        DEMOS --> WMD
-        TJSON --> WMD
-        SHARDS --> WMD --> WMDM
+        H5 --> FS --> FDM
+        H5 --> WMD --> WMDM
     end
 
     subgraph P1A["Fase 1a — Tokenizer"]
@@ -100,18 +95,20 @@ flowchart TD
 flowchart LR
     subgraph SRC["src/  — módulos de núcleo"]
         direction TB
-        DIST["distributions.py\nsymlog · symexp\ntwohot · pmpo_loss"]
+        DIST["distributions.py\nsymlog · symexp\ntwohot_encode/decode/loss · pmpo_loss"]
         AGT["agent.py\nPolicyHead\nRewardHead\nValueHead"]
         MDL["model.py\nEncoder · Decoder · Tokenizer\nDynamics · TaskEmbedder\nBlockCausalTransformer\nActionEncoder"]
         LOSS["losses.py\nLPIPSLoss\ndynamics_pretrain_loss\nmake_tau_schedule"]
         VIZ["viz.py\nsample_one_timestep_packed\nlog_tokenizer_viz_wandb\nrun_dynamics_eval"]
-        WMDS["wm_dataset.py\nWMDataset"]
-        SHRD["sharded_frame_dataset.py\nShardedFrameDataset"]
+        H5DS["hdf5_episode_dataset.py\nHDF5EpisodeWriter\nHDF5EpisodeDataset"]
+        GDS["goal_dataset.py\nGoalDataset"]
+        LNRM["loss_norm.py\nRunningRMS"]
+        CKU["checkpoint_utils.py\nload_frozen_tokenizer"]
         DIST --> AGT
         MDL --> LOSS
         MDL --> VIZ
         LOSS --> VIZ
-        SHRD --> WMDS
+        H5DS --> GDS
     end
 
     subgraph LTN["src/lightning/  — módulos Lightning"]
@@ -122,7 +119,7 @@ flowchart LR
         AMOD["agent_module.py\nAgentLightningModule"]
         FDMOD["frame_datamodule.py\nFrameDataModule"]
         WMOD["wm_datamodule.py\nWMDataModule"]
-        CB["callbacks.py\nTokenizerVizCallback\nDynamicsEvalCallback\nActionShuffleMetricCallback"]
+        CB["callbacks.py\nTokenizerVizCallback\nDynamicsEvalCallback\nActionShuffleMetricCallback\nAgentEvalCallback"]
     end
 
     MDL --> TMOD
@@ -138,8 +135,13 @@ flowchart LR
     DIST --> AMOD
     VIZ --> AMOD
     VIZ --> CB
-    WMDS --> WMOD
-    SHRD --> FDMOD
+    H5DS --> WMOD
+    H5DS --> FDMOD
+    LNRM --> TMOD
+    LNRM --> DMOD
+    LNRM --> FMOD
+    CKU --> DMOD
+    CKU --> FMOD
     FDMOD --> TMOD
     WMOD --> DMOD
     WMOD --> FMOD
